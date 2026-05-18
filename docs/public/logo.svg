@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+  <!-- Hexagon background -->
+  <path d="M16 2 L28 9 L28 23 L16 30 L4 23 L4 9 Z" fill="#646cff"/>
+  <!-- Lock shackle -->
+  <path d="M11.5 14.5V11.5a4.5 4.5 0 0 1 9 0v3" stroke="white" stroke-width="2.2" stroke-linecap="round" fill="none"/>
+  <!-- Lock body -->
+  <rect x="9" y="14.5" width="14" height="10" rx="2.5" fill="white"/>
+  <!-- Keyhole circle -->
+  <circle cx="16" cy="18.5" r="2" fill="#646cff"/>
+  <!-- Keyhole stem -->
+  <rect x="14.8" y="19.5" width="2.4" height="2.8" rx="1.2" fill="#646cff"/>
+</svg>
