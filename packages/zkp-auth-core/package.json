@@ -1,0 +1,45 @@
+{
+  "name": "@zkp-auth/core",
+  "version": "0.1.0",
+  "description": "Zero-Knowledge Proof core crypto — Schnorr PoK on Ed25519",
+  "keywords": ["zkp", "zero-knowledge", "authentication", "schnorr", "ed25519", "crypto", "typescript"],
+  "author": "Vedad Kovačević",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vedadkovacevic/zkp-auth.git",
+    "directory": "packages/zkp-auth-core"
+  },
+  "homepage": "https://zkp-auth.dev",
+  "bugs": {
+    "url": "https://github.com/vedadkovacevic/zkp-auth/issues"
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@noble/curves": "^1.9.7",
+    "@noble/hashes": "^1.8.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "fast-check": "^3",
+    "tsup": "^8.0.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.4.0"
+  },
+  "files": ["dist"],
+  "license": "MIT"
+}

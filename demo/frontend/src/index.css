@@ -1,0 +1,60 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-slate-950 text-slate-100 font-sans antialiased;
+  }
+}
+
+@layer components {
+  /* ── Card ──────────────────────────────────────────────────────────────── */
+  .card {
+    @apply bg-slate-900/80 backdrop-blur border border-slate-800 rounded-2xl p-8 shadow-2xl;
+  }
+
+  /* ── Input ─────────────────────────────────────────────────────────────── */
+  .input {
+    @apply w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3
+           text-slate-100 placeholder-slate-500
+           focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent
+           transition duration-200;
+  }
+
+  /* ── Primary button ─────────────────────────────────────────────────────── */
+  .btn-primary {
+    @apply w-full bg-brand-600 hover:bg-brand-500 active:bg-brand-700
+           text-white font-semibold py-3 px-6 rounded-xl
+           transition duration-200 disabled:opacity-50 disabled:cursor-not-allowed
+           focus:outline-none focus:ring-2 focus:ring-brand-400 focus:ring-offset-2 focus:ring-offset-slate-950;
+  }
+
+  /* ── Ghost button ───────────────────────────────────────────────────────── */
+  .btn-ghost {
+    @apply text-brand-400 hover:text-brand-300 font-medium text-sm
+           transition duration-200 focus:outline-none underline-offset-4 hover:underline;
+  }
+
+  /* ── Error alert ────────────────────────────────────────────────────────── */
+  .alert-error {
+    @apply bg-red-950/60 border border-red-800 text-red-300 rounded-xl px-4 py-3 text-sm;
+  }
+
+  /* ── Success badge ──────────────────────────────────────────────────────── */
+  .badge-success {
+    @apply inline-flex items-center gap-1.5 bg-emerald-900/60 border border-emerald-700
+           text-emerald-300 text-xs font-medium px-3 py-1 rounded-full;
+  }
+
+  /* ── Mono display ───────────────────────────────────────────────────────── */
+  .mono {
+    @apply font-mono text-xs bg-slate-800 border border-slate-700 rounded-lg p-3
+           break-all text-slate-300 leading-relaxed;
+  }
+
+  /* ── Label ──────────────────────────────────────────────────────────────── */
+  .field-label {
+    @apply block text-sm font-medium text-slate-400 mb-1.5;
+  }
+}

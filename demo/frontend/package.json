@@ -1,0 +1,30 @@
+{
+  "name": "@zkp-auth/demo-frontend",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "ZKP Auth demo frontend (Vite + React + Tailwind)",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@zkp-auth/client": "workspace:*",
+    "@zkp-auth/react": "workspace:*",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "@vitejs/plugin-react": "^4.2.0",
+    "autoprefixer": "^10.4.19",
+    "postcss": "^8.4.38",
+    "tailwindcss": "^3.4.3",
+    "typescript": "^5.4.0",
+    "vite": "^5.2.0"
+  }
+}

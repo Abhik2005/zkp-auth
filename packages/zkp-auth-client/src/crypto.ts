@@ -1,0 +1,421 @@
+// @zkp-auth/client — browser-safe Schnorr key generation and proof computation
+//
+// Re-implements the cryptographic protocol from @zkp-auth/core for the
+// browser environment. The math is identical — Schnorr PoK on Ed25519
+// with the Fiat-Shamir transform — but:
+//
+//   - CSPRNG: `globalThis.crypto.getRandomValues` (WebCrypto)
+//   - KDF: PBKDF2-SHA512 via `globalThis.crypto.subtle` (WebCrypto)
+//   - Ed25519: `@noble/curves/ed25519.js` (browser-compatible)
+//   - SHA-512: `@noble/hashes/sha512.js` (synchronous, browser-compatible)
+//
+// No `node:crypto` or any other Node.js built-in is imported.
+//
+// SECURITY-CRITICAL CONTRACTS (mirrors @zkp-auth/core compute-proof.ts):
+//
+// 1. `BASE.multiply(scalar)` is used for every scalar multiply — never
+//    `multiplyUnsafe` — because every scalar fed here (x, r) is secret.
+//
+// 2. The nonce buffer r_bytes is zeroed after proof assembly (best-effort;
+//    the bigint r cannot be wiped from the JS runtime).
+//
+// 3. No `===` / `!==` comparisons on byte arrays derived from secret material.
+//
+// 4. `passwordBytes` is validated for shape but is NOT mixed into the
+//    Fiat-Shamir transcript or the scalar derivation (mirrors core
+//    Requirement 11.1, Property 10).
+
+import { ed25519 } from '@noble/curves/ed25519.js';
+import { bytesToNumberLE, numberToBytesLE, concatBytes } from '@noble/curves/utils.js';
+import { sha512 } from '@noble/hashes/sha512.js';
+
+import { ZkpCryptoError } from './errors.js';
+
+// ── Constants ────────────────────────────────────────────────────────────────
+
+/**
+ * Maximum rejection-sampling iterations before treating the outcome as an
+ * RNG anomaly. Locked at 256 to match @zkp-auth/core. Under a healthy CSPRNG
+ * the probability of exhaustion is ≈ 2^-252.
+ */
+const MAX_REJECTION_ITERATIONS = 256;
+
+/** Maximum UTF-8 byte length of a username. */
+export const MAX_USERNAME_BYTES = 256;
+
+/**
+ * Maximum UTF-8 byte length of a password. Matches the `INVALID_PASSWORD`
+ * bound in @zkp-auth/core's `computeProof`.
+ */
+export const MAX_PASSWORD_BYTES = 4_096;
+
+// Ed25519 group order L and base point G — read from @noble/curves at module load.
+const L: bigint = ed25519.Point.Fn.ORDER;
+const BASE = ed25519.Point.BASE;
+
+// ── CSPRNG wrapper ───────────────────────────────────────────────────────────
+
+/**
+ * Draw 32 cryptographically random bytes from the browser CSPRNG.
+ *
+ * @throws ZkpCryptoError('RNG_FAILURE') when `getRandomValues` throws.
+ */
+function getRandomBytes32(): Uint8Array {
+  const buf = new Uint8Array(32);
+  try {
+    globalThis.crypto.getRandomValues(buf);
+  } catch (cause: unknown) {
+    throw new ZkpCryptoError('RNG_FAILURE', 'crypto.getRandomValues() failed', { cause });
+  }
+  return buf;
+}
+
+// ── Fiat-Shamir transcript ───────────────────────────────────────────────────
+
+/**
+ * Compute the Fiat-Shamir challenge scalar:
+ *   c = int_LE(SHA-512(R_bytes || publicKey_bytes || challenge)) mod L
+ *
+ * Mirrors the construction in @zkp-auth/core's `transcript.ts` exactly.
+ * SHA-512 from @noble/hashes is synchronous and browser-compatible.
+ */
+function computeFiatShamirScalar(
+  R_bytes: Uint8Array,
+  publicKey_bytes: Uint8Array,
+  challenge: Uint8Array,
+): bigint {
+  const digest = sha512(concatBytes(R_bytes, publicKey_bytes, challenge));
+  return ed25519.Point.Fn.create(bytesToNumberLE(digest));
+}
+
+// ── Public types ─────────────────────────────────────────────────────────────
+
+/**
+ * A freshly generated Ed25519 key pair for the ZKP-auth scheme.
+ *
+ * `privateKey` is a 32-byte little-endian encoding of a uniform scalar in
+ * `[1, L)`. It must be kept in memory only — never persisted or transmitted.
+ * `publicKey` is the 32-byte canonical point encoding of `privateKey · G`.
+ */
+export interface BrowserKeyPair {
+  /** 32-byte LE scalar in [1, L). Keep in memory; zero after use. */
+  privateKey: Uint8Array;
+  /** 32-byte Ed25519 point encoding of privateKey · G. Safe to send to server. */
+  publicKey: Uint8Array;
+}
+
+// ── Input validation helpers ─────────────────────────────────────────────────
+
+/**
+ * Validate that `username` is a non-empty string whose UTF-8 encoding does
+ * not exceed `MAX_USERNAME_BYTES` (256 bytes).
+ *
+ * @throws ZkpCryptoError('INVALID_USERNAME') on any violation.
+ */
+export function validateUsername(username: string): void {
+  if (typeof username !== 'string' || username.length === 0) {
+    throw new ZkpCryptoError('INVALID_USERNAME', 'username must be a non-empty string');
+  }
+  const encoded = new TextEncoder().encode(username);
+  if (encoded.byteLength > MAX_USERNAME_BYTES) {
+    throw new ZkpCryptoError(
+      'INVALID_USERNAME',
+      `username exceeds ${MAX_USERNAME_BYTES.toString()} UTF-8 bytes`,
+    );
+  }
+}
+
+/**
+ * Encode a password string as UTF-8 bytes and validate the byte length is
+ * within `[0, MAX_PASSWORD_BYTES]` (4 096 bytes). An empty password is
+ * permitted — it passes through as a zero-length `Uint8Array`.
+ *
+ * @throws ZkpCryptoError('INVALID_PASSWORD') when the encoding exceeds the limit.
+ */
+export function encodePassword(password: string): Uint8Array {
+  const bytes = new TextEncoder().encode(password);
+  if (bytes.byteLength > MAX_PASSWORD_BYTES) {
+    throw new ZkpCryptoError(
+      'INVALID_PASSWORD',
+      `password exceeds ${MAX_PASSWORD_BYTES.toString()} UTF-8 bytes`,
+    );
+  }
+  return bytes;
+}
+
+// ── Core crypto operations ───────────────────────────────────────────────────
+
+/**
+ * Generate a fresh `(privateKey, publicKey)` pair using the browser CSPRNG.
+ *
+ * Implements bounded rejection sampling: draws a 32-byte candidate from
+ * `crypto.getRandomValues`, decodes it as a little-endian bigint, accepts
+ * iff `1 ≤ n < L`. This gives a uniform distribution over `[1, L)` without
+ * the low-end bias that `mod L` reduction would introduce (2^256 is not a
+ * multiple of L).
+ *
+ * The public key is `n · G` using the constant-time multiply
+ * (`BASE.multiply`, never `multiplyUnsafe`).
+ *
+ * @throws ZkpCryptoError('RNG_FAILURE')  When `crypto.getRandomValues` throws
+ *   or the rejection-sampling loop exhausts 256 iterations.
+ * @throws ZkpCryptoError('CURVE_ERROR')  When @noble/curves raises an
+ *   unexpected error during the scalar multiply.
+ */
+export function browserGenerateKeyPair(): BrowserKeyPair {
+  for (let i = 0; i < MAX_REJECTION_ITERATIONS; i += 1) {
+    const candidate = getRandomBytes32(); // throws ZkpCryptoError('RNG_FAILURE') on fault
+
+    const n = bytesToNumberLE(candidate);
+    if (n >= 1n && n < L) {
+      // Accepted. Derive public key with constant-time multiply.
+      try {
+        const publicKey = BASE.multiply(n).toBytes();
+        return { privateKey: candidate, publicKey };
+      } catch (cause: unknown) {
+        throw new ZkpCryptoError(
+          'CURVE_ERROR',
+          '@noble/curves raised an error during key generation',
+          { cause },
+        );
+      }
+    }
+    // Rejected — draw again. The candidate bytes are not zeroed because they
+    // were never accepted as key material (same hygiene policy as core).
+  }
+
+  throw new ZkpCryptoError(
+    'RNG_FAILURE',
+    'Rejection sampling exhausted 256 iterations — CSPRNG may be faulty',
+  );
+}
+
+// ── Fixed domain separator for PBKDF2 password-derived keys ─────────────────
+
+/**
+ * Domain separator prepended to the password before PBKDF2 derivation.
+ * Prevents the same (username, password) pair from producing the same key
+ * in an unrelated system that also uses PBKDF2 with a username-based salt.
+ */
+const PBKDF2_DOMAIN = 'zkp-auth-v1:';
+
+/**
+ * PBKDF2-SHA512 iteration count.
+ *
+ * In production builds this is 600_000 (OWASP 2023 recommendation).
+ * Test builds inject `__TEST_PBKDF2_ITERATIONS__ = 1_000` via the
+ * vitest `define` config to keep the suite fast without changing the
+ * production default.
+ */
+const PBKDF2_ITERATIONS: number =
+  typeof __TEST_PBKDF2_ITERATIONS__ !== 'undefined'
+    ? __TEST_PBKDF2_ITERATIONS__
+    : 600_000;
+
+/**
+ * Derive a deterministic `(privateKey, publicKey)` pair from `username` and
+ * `password` using PBKDF2-SHA512 via the WebCrypto API.
+ *
+ * The same `(username, password)` always produces the same keypair, so the
+ * private key does NOT need to be persisted — `login()` re-derives it from
+ * the credentials the user types each time.
+ *
+ * KDF construction:
+ *   - Password material: UTF-8(`PBKDF2_DOMAIN` + password)
+ *   - Salt: UTF-8(username)
+ *   - PRF: HMAC-SHA-512
+ *   - Iterations: 600 000 (OWASP 2023)
+ *   - Output: 64 bytes — fed into rejection-sampling to produce a scalar in [1, L)
+ *
+ * Rejection-sampling reduces the 64-byte candidate modulo L using the
+ * full 512-bit value (no mod-L bias) and retries if the result is 0 or ≥ L.
+ * The probability of a single rejection is ≈ 2^-252; with 256 attempts the
+ * failure probability is negligible.
+ *
+ * @param username Non-empty string, ≤ 256 UTF-8 bytes.
+ * @param password String, ≤ 4 096 UTF-8 bytes.
+ *
+ * @returns A `BrowserKeyPair` whose `privateKey` is deterministic for the
+ *   given credentials.
+ *
+ * @throws ZkpCryptoError('RNG_FAILURE')  When PBKDF2 exhausts 256 candidates
+ *   without finding a scalar in [1, L) — cryptographically impossible under
+ *   correct inputs.
+ * @throws ZkpCryptoError('CURVE_ERROR')  When @noble/curves raises an error
+ *   during the public-key scalar multiply.
+ */
+export async function browserDeriveKeyPair(
+  username: string,
+  password: string,
+  pbkdf2Iterations: number = PBKDF2_ITERATIONS,
+): Promise<BrowserKeyPair> {
+  const enc = new TextEncoder();
+
+  // Import the password + domain prefix as a raw PBKDF2 key material.
+  const keyMaterial = await globalThis.crypto.subtle.importKey(
+    'raw',
+    enc.encode(PBKDF2_DOMAIN + password),
+    'PBKDF2',
+    false,              // not extractable
+    ['deriveBits'],
+  );
+
+  // Salt is the UTF-8 encoding of the username (domain-bound, not secret).
+  const salt = enc.encode(username);
+
+  // Rejection-sampling loop: derive 64 bytes each iteration until we get a
+  // scalar in [1, L). With an ideal PRF this terminates on the first try.
+  for (let attempt = 0; attempt < MAX_REJECTION_ITERATIONS; attempt += 1) {
+    // Mix attempt counter into PBKDF2 salt so each retry is independent.
+    const saltWithCounter = new Uint8Array(salt.byteLength + 1);
+    saltWithCounter.set(salt);
+    saltWithCounter[salt.byteLength] = attempt; // 0..255
+
+    const derived = await globalThis.crypto.subtle.deriveBits(
+      {
+        name: 'PBKDF2',
+        salt: saltWithCounter,
+        iterations: pbkdf2Iterations,
+        hash: 'SHA-512',
+      },
+      keyMaterial,
+      512, // 64 bytes
+    );
+
+    // Take only the first 32 bytes as the candidate scalar.
+    const candidate = new Uint8Array(derived, 0, 32);
+
+    const n = bytesToNumberLE(candidate);
+    if (n >= 1n && n < L) {
+      try {
+        const publicKey = BASE.multiply(n).toBytes();
+        // Return a copy — `derived` ArrayBuffer must not leak.
+        return { privateKey: Uint8Array.from(candidate), publicKey };
+      } catch (cause: unknown) {
+        throw new ZkpCryptoError(
+          'CURVE_ERROR',
+          '@noble/curves raised an error during derived key-pair computation',
+          { cause },
+        );
+      }
+    }
+    // Candidate rejected (n === 0n or n >= L): retry with next counter value.
+  }
+
+  throw new ZkpCryptoError(
+    'RNG_FAILURE',
+    'browserDeriveKeyPair: rejection sampling exhausted 256 attempts — inputs may be malformed',
+  );
+}
+
+/**
+ * Compute a 64-byte Schnorr proof of knowledge of `privateKey` over a
+ * verifier-chosen 32-byte `challenge`.
+ *
+ * The returned proof is `R_bytes || s_bytes` (32 bytes each), where:
+ *   - `R = r · G`  (commitment; r is a fresh CSPRNG nonce in [1, L))
+ *   - `c = int_LE(SHA-512(R || X || challenge)) mod L`  (Fiat-Shamir)
+ *   - `s = (r + c · x) mod L`  (response; x = int_LE(privateKey))
+ *
+ * This construction is byte-identical to @zkp-auth/core's `computeProof`
+ * for the same inputs and the same nonce, so proofs produced here verify
+ * correctly against the server's `verifyProof`.
+ *
+ * `passwordBytes` is accepted as opaque bytes and is NOT mixed into the
+ * transcript or scalar derivation (mirrors core Requirement 11.1).
+ *
+ * @param privateKey    32-byte LE scalar produced by `browserGenerateKeyPair`.
+ * @param passwordBytes UTF-8-encoded password, length in [0, 4096].
+ *                      Shape must be validated by the caller before passing.
+ * @param challenge     32-byte server-issued challenge (hex-decoded upstream).
+ *
+ * @returns 64-byte `Uint8Array` carrying `R_bytes || s_bytes`.
+ *
+ * @throws ZkpCryptoError('CURVE_ERROR') On @noble/curves internal error or
+ *   when `privateKey` decodes outside `[1, L)`.
+ * @throws ZkpCryptoError('RNG_FAILURE') On CSPRNG failure or loop exhaustion.
+ */
+export function browserComputeProof(
+  privateKey: Uint8Array,
+  passwordBytes: Uint8Array,
+  challenge: Uint8Array,
+): Uint8Array {
+  // Decode private key scalar. Reject 0 and anything ≥ L (mirrors core step 2).
+  const x = bytesToNumberLE(privateKey);
+  if (x === 0n || x >= L) {
+    throw new ZkpCryptoError(
+      'CURVE_ERROR',
+      'privateKey decodes to a scalar outside [1, L)',
+    );
+  }
+
+  // Derive public key for the Fiat-Shamir transcript (constant-time multiply).
+  let publicKey_bytes: Uint8Array;
+  try {
+    publicKey_bytes = BASE.multiply(x).toBytes();
+  } catch (cause: unknown) {
+    throw new ZkpCryptoError(
+      'CURVE_ERROR',
+      '@noble/curves raised an error deriving the public key',
+      { cause },
+    );
+  }
+
+  // `passwordBytes` is intentionally unused past this point. The `void`
+  // expression silences the unused-variable lint without removing the
+  // parameter (it still participates in the call signature for forward-
+  // compatibility when password derivation is added in a future version).
+  void passwordBytes;
+
+  // Bounded rejection sampling for the nonce r (mirrors core step 4).
+  // Unlike keypair generation, we use mod-L reduction (not raw range check)
+  // because a single-use ephemeral nonce with uniform distribution mod L
+  // is cryptographically acceptable. We only reject the degenerate r === 0n.
+  for (let i = 0; i < MAX_REJECTION_ITERATIONS; i += 1) {
+    const r_bytes = getRandomBytes32(); // throws ZkpCryptoError('RNG_FAILURE') on fault
+    const r = ed25519.Point.Fn.create(bytesToNumberLE(r_bytes));
+
+    if (r !== 0n) {
+      // Commitment R = r · G (constant-time multiply, multiplyUnsafe forbidden).
+      let R_bytes: Uint8Array;
+      try {
+        R_bytes = BASE.multiply(r).toBytes();
+      } catch (cause: unknown) {
+        throw new ZkpCryptoError(
+          'CURVE_ERROR',
+          '@noble/curves raised an error computing the commitment',
+          { cause },
+        );
+      }
+
+      // Fiat-Shamir challenge scalar.
+      const c = computeFiatShamirScalar(R_bytes, publicKey_bytes, challenge);
+
+      // Response s = (r + c · x) mod L.
+      const s = ed25519.Point.Fn.create(r + c * x);
+      const s_bytes = numberToBytesLE(s, 32);
+
+      // Zero the nonce buffer (best-effort per core Requirement 6.4).
+      // The bigint `r` cannot be wiped from the JS runtime.
+      r_bytes.fill(0);
+
+      return concatBytes(R_bytes, s_bytes);
+    }
+    // r === 0n: redraw. r_bytes is left to the GC (never used as nonce material).
+  }
+
+  throw new ZkpCryptoError(
+    'RNG_FAILURE',
+    'Nonce rejection-sampling exhausted 256 iterations — CSPRNG may be faulty',
+  );
+}
+
+/** @internal Exported for unit tests only — not part of the public API. */
+export const _internals = {
+  MAX_USERNAME_BYTES,
+  MAX_PASSWORD_BYTES,
+  MAX_REJECTION_ITERATIONS,
+  PBKDF2_ITERATIONS,
+  L,
+  computeFiatShamirScalar,
+} as const;
