@@ -120,7 +120,7 @@ function LoginForm() {
 
 ## Documentation
 
-Full documentation is available at **[zkp-auth.dev](https://zkp-auth.dev)** (or run locally — see below):
+Full documentation is available at **[abhik2005.github.io/zkp-auth](https://abhik2005.github.io/zkp-auth/)**:
 
 - [Getting Started](docs/getting-started.md)
 - [Security Model](docs/security.md)
