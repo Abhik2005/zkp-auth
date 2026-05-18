@@ -6,9 +6,8 @@ export default defineConfig({
   description:
     'Zero-Knowledge Proof authentication — Schnorr Proof of Knowledge on Ed25519. Passwords never leave the browser.',
 
-  // GitHub Pages deployment: set base to your repo name if deploying to
-  // https://<user>.github.io/<repo>/
-  // base: '/zkp-auth/',
+  // GitHub Pages: site will be at https://Abhik2005.github.io/zkp-auth/
+  base: '/zkp-auth/',
 
   head: [
     ['meta', { name: 'theme-color', content: '#646cff' }],
@@ -54,7 +53,7 @@ export default defineConfig({
     ],
 
     socialLinks: [
-      { icon: 'github', link: 'https://github.com/your-org/zkp-auth' },
+      { icon: 'github', link: 'https://github.com/Abhik2005/zkp-auth' },
     ],
 
     footer: {
@@ -63,7 +62,7 @@ export default defineConfig({
     },
 
     editLink: {
-      pattern: 'https://github.com/your-org/zkp-auth/edit/main/docs/:path',
+      pattern: 'https://github.com/Abhik2005/zkp-auth/edit/main/docs/:path',
       text: 'Edit this page on GitHub',
     },
 
