@@ -1,6 +1,6 @@
 {
   "name": "@zkp-auth/client",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Browser SDK for ZKP authentication",
   "keywords": ["zkp", "zero-knowledge", "authentication", "browser", "sdk", "typescript"],
   "author": "Vedad Kovačević",

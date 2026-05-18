@@ -1,6 +1,6 @@
 {
   "name": "@zkp-auth/react",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "React hooks for ZKP authentication",
   "keywords": ["zkp", "zero-knowledge", "authentication", "react", "hooks", "typescript"],
   "author": "Vedad Kovačević",
