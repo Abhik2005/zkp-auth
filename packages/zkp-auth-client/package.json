@@ -1,17 +1,17 @@
 {
   "name": "@zkp-auth/client",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Browser SDK for ZKP authentication",
   "keywords": ["zkp", "zero-knowledge", "authentication", "browser", "sdk", "typescript"],
   "author": "Vedad Kovačević",
   "repository": {
     "type": "git",
-    "url": "https://github.com/vedadkovacevic/zkp-auth.git",
+    "url": "https://github.com/Abhik2005/zkp-auth.git",
     "directory": "packages/zkp-auth-client"
   },
-  "homepage": "https://zkp-auth.dev",
+  "homepage": "https://github.com/Abhik2005/zkp-auth#readme",
   "bugs": {
-    "url": "https://github.com/vedadkovacevic/zkp-auth/issues"
+    "url": "https://github.com/Abhik2005/zkp-auth/issues"
   },
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",

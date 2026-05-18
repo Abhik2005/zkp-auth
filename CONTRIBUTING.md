@@ -35,7 +35,7 @@ We follow the [Contributor Covenant v2.1](https://www.contributor-covenant.org/v
 **Setup**
 
 ```bash
-git clone https://github.com/vedadkovacevic/zkp-auth.git
+git clone https://github.com/Abhik2005/zkp-auth.git
 cd zkp-auth
 pnpm install
 pnpm build

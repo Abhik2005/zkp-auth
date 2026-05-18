@@ -32,21 +32,18 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # pnpm typecheck resolves to `pnpm -r typecheck` (see root package.json).
-      # This recursively invokes the `typecheck` script in every workspace package,
-      # including `packages/zkp-auth-core`, whose tsconfig.json extends
-      # tsconfig.base.json — so @zkp-auth/core is always typechecked here.
-      - name: Typecheck
-        run: pnpm typecheck
-
       - name: Lint
         run: pnpm lint
 
+      # Build first — downstream packages (server, client, react) resolve
+      # @zkp-auth/core via workspace:* which points to dist/. Without building
+      # core first, tsc cannot find its type declarations and emits TS2307.
       - name: Build
         run: pnpm build
 
+      # Typecheck runs after build so all workspace dist/ folders exist.
+      - name: Typecheck
+        run: pnpm typecheck
+
       - name: Test
         run: pnpm test
-
-      - name: Test @zkp-auth/core
-        run: pnpm --filter @zkp-auth/core test

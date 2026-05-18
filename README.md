@@ -4,7 +4,7 @@
 [![npm version](https://img.shields.io/npm/v/@zkp-auth/server?label=%40zkp-auth%2Fserver&color=6366f1)](https://www.npmjs.com/package/@zkp-auth/server)
 [![npm version](https://img.shields.io/npm/v/@zkp-auth/client?label=%40zkp-auth%2Fclient&color=6366f1)](https://www.npmjs.com/package/@zkp-auth/client)
 [![npm version](https://img.shields.io/npm/v/@zkp-auth/react?label=%40zkp-auth%2Freact&color=6366f1)](https://www.npmjs.com/package/@zkp-auth/react)
-[![CI](https://github.com/vedadkovacevic/zkp-auth/actions/workflows/ci.yml/badge.svg)](https://github.com/vedadkovacevic/zkp-auth/actions/workflows/ci.yml)
+[![CI](https://github.com/Abhik2005/zkp-auth/actions/workflows/ci.yml/badge.svg)](https://github.com/Abhik2005/zkp-auth/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **Zero-Knowledge Proof authentication for TypeScript.** Prove you know a secret without ever sending it — no passwords leave the client, ever.
@@ -142,7 +142,7 @@ pnpm docs:dev
 **Requirements:** Node.js ≥ 20, pnpm ≥ 9
 
 ```bash
-git clone https://github.com/vedadkovacevic/zkp-auth.git
+git clone https://github.com/Abhik2005/zkp-auth.git
 cd zkp-auth
 pnpm install
 
@@ -166,4 +166,4 @@ Found a vulnerability? Please follow the [responsible disclosure process](SECURI
 
 ## License
 
-[MIT](LICENSE) © 2026 Vedad Kovačević
+[MIT](LICENSE) © 2026 Abhik
