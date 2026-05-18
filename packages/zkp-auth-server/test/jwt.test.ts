@@ -14,7 +14,7 @@
  * - custom expiresInSeconds is honoured
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { signJwt, verifyJwt } from '../src/jwt.js';
 import { InvalidJwtError } from '../src/jwt-errors.js';
 

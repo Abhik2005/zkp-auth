@@ -314,7 +314,7 @@ function countMatches(text: string, regex: RegExp): number {
   const re = new RegExp(regex.source, flags);
   let count = 0;
   // `String.prototype.matchAll` requires a `g` flag; spread to count.
-  for (const _m of text.matchAll(re)) {
+  for (const _ of text.matchAll(re)) {
     count += 1;
   }
   return count;
