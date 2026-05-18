@@ -225,7 +225,7 @@ app.post('/api/logout', (_req: Request, res: Response): void => {
 // Global error handler
 // ---------------------------------------------------------------------------
 
-app.use((err: unknown, _req: Request, res: Response, _next: NextFunction): void => { // eslint-disable-line @typescript-eslint/no-unused-vars
+app.use((err: unknown, _req: Request, res: Response, _next: NextFunction): void => {
   if (err instanceof ServerError) {
     res.status(err.httpStatus).json(toErrorBody(err));
     return;
