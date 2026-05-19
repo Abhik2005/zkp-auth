@@ -20,6 +20,7 @@
 import type { RequestHandler } from 'express';
 import { handleVerify } from '../core/verify.js';
 import { ServerError, toErrorBody, RateLimitedError } from '../errors.js';
+import { enforceAuthRateLimit } from '../rate-limit.js';
 import type { ZkpVerifyOptions } from '../types.js';
 
 /**
@@ -51,6 +52,16 @@ import type { ZkpVerifyOptions } from '../types.js';
  */
 export function zkpVerify(options: ZkpVerifyOptions): RequestHandler {
   return async (req, res, next): Promise<void> => {
+    if (options.authRateLimiter !== false) {
+      try {
+        await enforceAuthRateLimit(req, options.authRateLimiter);
+      } catch {
+        const err = new RateLimitedError();
+        res.status(err.httpStatus).json(toErrorBody(err));
+        return;
+      }
+    }
+
     // Rate-limit hook (if provided)
     if (options.rateLimitHook !== undefined) {
       try {

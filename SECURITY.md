@@ -4,7 +4,8 @@
 
 | Version | Supported |
 |---|---|
-| 0.1.x | ✅ Yes |
+| 0.2.x | ✅ Yes |
+| 0.1.x | ⚠️ Security fixes only |
 
 Older versions receive no security updates once a new minor version is released.
 
@@ -50,13 +51,15 @@ We follow coordinated disclosure: we will work with you to understand and fix th
 - Cryptographic weaknesses in proof generation or verification (`@zkp-auth/core`)
 - Timing side-channel vulnerabilities in comparison or verification logic
 - Authentication bypass — forging a valid proof without knowing the private scalar
-- Key derivation weaknesses in `@zkp-auth/client`
+- Key storage weaknesses — bypassing Argon2id or AES-256-GCM in `@zkp-auth/client`
+- PIN brute-force feasibility (Argon2id parameters, memory cost)
 - Token forgery or privilege escalation in `@zkp-auth/server`
+- IndexedDB data leakage from the encrypted key store
 
 **Out of scope:**
 
 - Vulnerabilities in third-party dependencies (report upstream)
-- Attacks requiring physical device access
+- Attacks requiring physical device access (mitigated by Argon2id; in scope only if the KDF is bypassable)
 - Social engineering
 - Issues in the demo application that do not affect library code
 
@@ -66,12 +69,28 @@ We follow coordinated disclosure: we will work with you to understand and fix th
 
 ZKP Auth uses the **Schnorr Proof of Knowledge** scheme over **Ed25519** with the **Fiat–Shamir transform**:
 
-- Private scalars never leave the client
-- Each proof is bound to a fresh random nonce — proofs are not replayable
-- Challenge hashing: `SHA-512(R ‖ publicKey ‖ message)` — domain-separated
-- Point validation is performed on every deserialized curve point
+### Key Generation
+- Ed25519 keypairs are generated using **bounded rejection sampling** over `globalThis.crypto.getRandomValues`
+- Private scalars are uniform over `[1, L)` — no modular-reduction bias
+- The public key has **no relationship to any password** — public-key oracle attacks against the server DB are impossible
+
+### Local Key Storage
+- Private keys are encrypted with **AES-256-GCM** before being written to IndexedDB
+- The AES wrapping key is derived from a user PIN via **Argon2id** (`m = 65536 KB, t = 3, p = 1`)
+- A fresh random 16-byte **salt** and 12-byte **IV** are generated for every `generateAndStore` call
+- The PIN **never leaves the browser** — it is never transmitted or logged
+
+### Proof Construction
+- Private scalars are loaded into memory only during proof computation
+- Private key buffers are **unconditionally zeroed** in `finally` blocks after use
+- Each proof is bound to a fresh server-issued challenge — proofs are not replayable
+- Challenge hashing: `SHA-512(R ‖ publicKey ‖ message) mod L` — domain-separated
 - Scalar range is validated before any curve operation
 - All byte comparisons use `crypto.timingSafeEqual()` to prevent timing attacks
+
+### What the server stores
+- Only a 32-byte Ed25519 **public key** — no password, no hash, no PIN
+- A compromised server DB reveals only public keys, which are mathematically useless without the corresponding private scalar
 
 This library has **not** undergone a formal third-party cryptographic audit. Use accordingly.
 

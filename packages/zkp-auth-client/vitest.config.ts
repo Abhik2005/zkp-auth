@@ -8,12 +8,12 @@ export default defineConfig({
       provider: 'v8',
       reporter: ['text', 'lcov'],
     },
-    testTimeout: 15_000,  // generous headroom for any slow async crypto in CI
+    testTimeout: 30_000, // Argon2id at low memory is still slower than PBKDF2
   },
   define: {
-    // Override PBKDF2 iterations in test builds for speed.
-    // crypto.ts reads __TEST_PBKDF2_ITERATIONS__ at module init; production
-    // builds have no define so the constant falls back to 600_000.
-    __TEST_PBKDF2_ITERATIONS__: 1_000,
+    // Override Argon2id memory cost in test builds for speed.
+    // key-storage.ts reads __TEST_ARGON2_MEMORY__ at module init; production
+    // builds have no define so the constant falls back to 65_536 (64 MB).
+    __TEST_ARGON2_MEMORY__: 64, // 64 KB — fast but still exercises the real code path
   },
 });

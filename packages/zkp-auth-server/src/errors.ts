@@ -21,7 +21,8 @@
  * - `CHALLENGE_REPLAYED`  — the same challenge was submitted more than once.
  * - `PROOF_INVALID`       — cryptographic verification returned false.
  * - `PUBLIC_KEY_NOT_FOUND`— the user's public key is not registered.
- * - `RATE_LIMITED`        — the external rate-limiter hook rejected the request.
+ * - `REGISTRATION_FAILED`— generic duplicate/unsafe registration failure.
+ * - `RATE_LIMITED`        — a rate limiter rejected the request.
  * - `INTERNAL_ERROR`      — unexpected internal fault (wraps crypto / IO errors).
  */
 export type ServerErrorCode =
@@ -32,6 +33,7 @@ export type ServerErrorCode =
   | 'CHALLENGE_REPLAYED'
   | 'PROOF_INVALID'
   | 'PUBLIC_KEY_NOT_FOUND'
+  | 'REGISTRATION_FAILED'
   | 'RATE_LIMITED'
   | 'INTERNAL_ERROR';
 
@@ -122,6 +124,13 @@ export class ProofInvalidError extends ServerError {
 export class PublicKeyNotFoundError extends ServerError {
   constructor(userId: string) {
     super('PUBLIC_KEY_NOT_FOUND', `No public key registered for user '${userId}'`, 401);
+  }
+}
+
+/** Duplicate or unsafe registration attempt. */
+export class RegistrationFailedError extends ServerError {
+  constructor() {
+    super('REGISTRATION_FAILED', 'registration failed', 409);
   }
 }
 

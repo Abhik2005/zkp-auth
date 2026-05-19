@@ -75,26 +75,24 @@ const challenge = generateChallenge(sessionId);
 
 ---
 
-### `computeProof(privateKey, password, challenge)`
+### `computeProof(privateKey, challenge)`
 
 Computes a 64-byte Schnorr proof of knowledge of `privateKey` over a verifier-chosen `challenge`.
 
 ```ts
 function computeProof(
   privateKey: Uint8Array, // 32 bytes, scalar in [1, L)
-  password:   Uint8Array, // 0–4096 bytes (validated but currently unused in proof math)
   challenge:  Uint8Array, // 32 bytes, from generateChallenge()
 ): Uint8Array             // 64 bytes: R_bytes (32) || s_bytes (32)
 ```
 
-The proof encodes `R = r·G` (the commitment) concatenated with the response scalar `s = (r + c·x) mod L`. The `password` parameter is validated for shape but **does not participate in the proof computation** — it is reserved for forward-compatible password-derived-key schemes.
+The proof encodes `R = r·G` (the commitment) concatenated with the response scalar `s = (r + c·x) mod L`.
 
 **Throws**
 
 | Error class | `.code` | Condition |
 |---|---|---|
 | `InvalidInputError` | `'INVALID_PRIVATE_KEY'` | Not `Uint8Array(32)`, or scalar is 0 or ≥ L |
-| `InvalidInputError` | `'INVALID_PASSWORD'` | Not a `Uint8Array`, or length > 4096 |
 | `InvalidInputError` | `'INVALID_CHALLENGE'` | Not `Uint8Array(32)` |
 | `RandomnessError` | `'RNG_FAILURE'` | CSPRNG fault during nonce generation |
 
@@ -103,11 +101,7 @@ The proof encodes `R = r·G` (the commitment) concatenated with the response sca
 ```ts
 import { computeProof } from '@zkp-auth/core';
 
-const proof = computeProof(
-  privateKey,
-  new TextEncoder().encode(password),
-  challengeBytes,
-);
+const proof = computeProof(privateKey, challengeBytes);
 // proof is 64 bytes — send proofHex to the server
 ```
 
@@ -164,7 +158,6 @@ type ErrorCode =
   | 'INVALID_CHALLENGE'
   | 'INVALID_PROOF'
   | 'INVALID_SESSION_ID'
-  | 'INVALID_PASSWORD'
   | 'RNG_FAILURE'
   | 'CURVE_ERROR';
 ```
@@ -175,7 +168,7 @@ type ErrorCode =
 import { InvalidInputError, RandomnessError } from '@zkp-auth/core';
 
 try {
-  const proof = computeProof(privateKey, password, challenge);
+  const proof = computeProof(privateKey, challenge);
 } catch (err) {
   if (err instanceof InvalidInputError) {
     console.error('bad input:', err.code);
@@ -199,10 +192,10 @@ npm install @zkp-auth/server
 
 ### `zkpRegister(options)`
 
-Express middleware factory. Validates the request body, calls `savePublicKey`, and calls `next()` on success.
+Express middleware factory. Validates the request body, rejects duplicate users, calls `savePublicKey`, and responds with HTTP 201 on success.
 
 ```ts
-import { zkpRegister } from '@zkp-auth/server';
+import { zkpRegister, RegistrationFailedError } from '@zkp-auth/server';
 
 function zkpRegister(options: ZkpRegisterOptions): RequestHandler
 ```
@@ -220,7 +213,9 @@ function zkpRegister(options: ZkpRegisterOptions): RequestHandler
 
 ```ts
 interface ZkpRegisterOptions {
-  /** Called with (userId, publicKey) after validation succeeds. */
+  /** Look up an existing registration before writing. */
+  getPublicKey: (userId: string) => Promise<Uint8Array | null>;
+  /** Create-only write. Must fail on duplicate userId; do not upsert/update. */
   savePublicKey: (userId: string, publicKey: Uint8Array) => Promise<void>;
   /** Optional async rate-limit hook. Throw to block the request. */
   rateLimitHook?: (req: Request) => Promise<void>;
@@ -231,8 +226,9 @@ interface ZkpRegisterOptions {
 
 | Status | Condition |
 |---|---|
-| calls `next()` | success — route handler may send its own response |
+| `201` | registration created |
 | `400` | missing / malformed fields |
+| `409` | duplicate or unsafe registration attempt |
 | `429` | `rateLimitHook` threw |
 | `500` | `savePublicKey` threw unexpectedly |
 
@@ -242,11 +238,23 @@ interface ZkpRegisterOptions {
 app.post(
   '/auth/register',
   zkpRegister({
+    getPublicKey: async (userId) => {
+      const user = await db.users.findUnique({ where: { userId } });
+      return user ? new Uint8Array(user.publicKey) : null;
+    },
     savePublicKey: async (userId, publicKey) => {
-      await db.users.upsert({ userId, publicKey: Buffer.from(publicKey) });
+      try {
+        await db.users.create({
+          data: { userId, publicKey: Buffer.from(publicKey) },
+        });
+      } catch (err) {
+        if (isUniqueViolation(err)) {
+          throw new RegistrationFailedError();
+        }
+        throw err;
+      }
     },
   }),
-  (_req, res) => res.status(201).json({ ok: true }),
 );
 ```
 
@@ -419,7 +427,7 @@ interface ZkpJwtPayload {
 
 ## `@zkp-auth/client`
 
-Browser SDK. Wraps keypair derivation, proof computation, and HTTP calls into two async methods.
+Browser SDK. Generates random Ed25519 keypairs, stores them encrypted in IndexedDB, and wraps the proof + HTTP flow into two async methods.
 
 ```bash
 npm install @zkp-auth/client
@@ -444,15 +452,21 @@ interface ZkpAuthClientOptions {
    * Pass '' or '/' to use same-origin paths (Vite/webpack proxy).
    */
   baseUrl: string;
+
+  /**
+   * Key storage backend. Defaults to IndexedDBKeyStorage.
+   * Pass MemoryKeyStorage for tests or Electron environments.
+   */
+  storage?: KeyStorage;
 }
 ```
 
 ---
 
-#### `client.register(username, password)`
+#### `client.register(username, pin)`
 
 ```ts
-async register(username: string, password: string): Promise<RegisterOutcome>
+async register(username: string, pin: string): Promise<RegisterOutcome>
 
 interface RegisterOutcome {
   userId:       string; // the registered username
@@ -460,14 +474,20 @@ interface RegisterOutcome {
 }
 ```
 
-Steps: derive keypair via PBKDF2 → POST `/auth/register` → cache private key in memory.
+Steps:
+1. Generate a random Ed25519 keypair.
+2. Encrypt the private key with Argon2id (PIN + random salt) → AES-256-GCM.
+3. Store the encrypted blob in IndexedDB (via the `storage` backend).
+4. POST `{ userId, publicKeyHex }` to `/auth/register`.
+
+The PIN is never transmitted. The private key is never stored in plaintext.
 
 **Throws**
 
 | Error class | `.code` | Condition |
 |---|---|---|
 | `ZkpCryptoError` | `'INVALID_USERNAME'` | Empty or > 256 UTF-8 bytes |
-| `ZkpCryptoError` | `'INVALID_PASSWORD'` | > 4096 UTF-8 bytes |
+| `ZkpCryptoError` | `'INVALID_PIN'` | Empty string |
 | `ZkpCryptoError` | `'RNG_FAILURE'` | CSPRNG fault |
 | `ZkpCryptoError` | `'CURVE_ERROR'` | Curve library internal error |
 | `ZkpNetworkError` | — | `fetch()` rejected (network down) |
@@ -475,10 +495,10 @@ Steps: derive keypair via PBKDF2 → POST `/auth/register` → cache private key
 
 ---
 
-#### `client.login(username, password)`
+#### `client.login(username, pin)`
 
 ```ts
-async login(username: string, password: string): Promise<LoginOutcome>
+async login(username: string, pin: string): Promise<LoginOutcome>
 
 interface LoginOutcome {
   userId: string; // authenticated username
@@ -486,15 +506,23 @@ interface LoginOutcome {
 }
 ```
 
-Steps: re-derive key from PBKDF2 (or use cached key) → GET challenge → compute proof → POST `/auth/verify`.
+Steps:
+1. Load encrypted blob from IndexedDB.
+2. Decrypt with Argon2id (PIN + stored salt) → AES-256-GCM.
+3. POST `{ userId }` to `/auth/challenge` → receive `challengeHex`.
+4. Compute Schnorr proof using the decrypted private key.
+5. **Zero the private key unconditionally** (in a `finally` block).
+6. POST `{ userId, proofHex }` to `/auth/verify` → receive JWT.
 
 **Throws**
 
 | Error class | `.code` | Condition |
 |---|---|---|
 | `ZkpCryptoError` | `'INVALID_USERNAME'` | Empty or > 256 UTF-8 bytes |
-| `ZkpCryptoError` | `'CURVE_ERROR'` | No key in memory, or curve error |
+| `ZkpCryptoError` | `'INVALID_PIN'` | Empty string |
+| `ZkpCryptoError` | `'DECRYPTION_FAILED'` | Wrong PIN — AES-GCM tag mismatch |
 | `ZkpCryptoError` | `'RNG_FAILURE'` | CSPRNG fault during proof nonce |
+| `ZkpStorageError` | `'KEY_NOT_FOUND'` | No key in storage — call `register()` first |
 | `ZkpNetworkError` | — | `fetch()` rejected |
 | `ZkpServerError` | `'CHALLENGE_FAILED'` | Server did not issue challenge |
 | `ZkpServerError` | `'PROOF_REJECTED'` | Proof verification failed |
@@ -502,20 +530,98 @@ Steps: re-derive key from PBKDF2 (or use cached key) → GET challenge → compu
 
 ---
 
-#### Key lifecycle methods
+#### `client.hasLocalKey(userId)`
 
 ```ts
-// true when a private key is held in memory
+async hasLocalKey(userId: string): Promise<boolean>
+```
+
+Returns `true` when an encrypted key exists in storage for `userId`. Use this to decide whether to show a "Register" or "Log in with PIN" form without making a network call.
+
+---
+
+#### `client.exportKeyBlob(userId, pin)` / `client.importKeyBlob(userId, blob, pin)`
+
+```ts
+async exportKeyBlob(userId: string, pin: string): Promise<string>  // JSON string
+async importKeyBlob(userId: string, blob: string, pin: string): Promise<void>
+```
+
+Transfer an encrypted key to another device without exposing the private key. The blob is opaque JSON that includes the ciphertext, salt, and IV. `importKeyBlob` verifies the PIN before writing to storage.
+
+**Throws** (`exportKeyBlob`)
+
+| Error class | `.code` | Condition |
+|---|---|---|
+| `ZkpCryptoError` | `'INVALID_PIN'` | Empty PIN |
+| `ZkpStorageError` | `'KEY_NOT_FOUND'` | No key in storage for `userId` |
+
+**Throws** (`importKeyBlob`)
+
+| Error class | `.code` | Condition |
+|---|---|---|
+| `ZkpCryptoError` | `'INVALID_PIN'` | Empty PIN |
+| `ZkpCryptoError` | `'DECRYPTION_FAILED'` | Wrong PIN |
+| `ZkpStorageError` | `'STORAGE_ERROR'` | Malformed blob JSON or missing fields |
+
+---
+
+#### Key lifecycle methods (advanced)
+
+```ts
+// true when a private key is held in memory (legacy in-memory API)
 client.hasKey: boolean
 
-// Zero-fill and discard the in-memory private key (call on logout)
+// Zero-fill and discard the in-memory private key
 client.clearKey(): void
 
-// Load a previously exported key back (e.g. from encrypted IndexedDB)
+// Load a previously exported key back into memory
 client.loadKey(privateKey: Uint8Array): void
 
-// Export a copy of the in-memory private key for out-of-band persistence
+// Export a copy of the in-memory private key
 client.exportKey(): Uint8Array
+```
+
+::: tip Prefer the PIN-based API
+`loadKey` / `exportKey` are a lower-level API for advanced use cases. For normal register/login flows, use `register(username, pin)` and `login(username, pin)`.
+:::
+
+---
+
+#### `KeyStorage` interface
+
+```ts
+import type { KeyStorage } from '@zkp-auth/client';
+
+interface KeyStorage {
+  generateAndStore(userId: string, pin: string): Promise<Uint8Array>; // returns publicKey
+  unlock(userId: string, pin: string): Promise<Uint8Array>;           // returns privateKey — MUST be zeroed by caller
+  hasKey(userId: string): Promise<boolean>;
+  exportBlob(userId: string, pin: string): Promise<string>;
+  importBlob(userId: string, blob: string, pin: string): Promise<void>;
+  deleteKey(userId: string): Promise<void>;
+}
+```
+
+Implement this interface to provide a custom storage backend. For example, to add WebAuthn hardware-backed keys:
+
+```ts
+class WebAuthnKeyStorage implements KeyStorage {
+  async generateAndStore(userId: string, _pin: string): Promise<Uint8Array> {
+    // Call navigator.credentials.create() with Ed25519 algorithm
+    // ...
+  }
+  async unlock(userId: string, _pin: string): Promise<Uint8Array> {
+    // Call navigator.credentials.get() — triggers platform biometric
+    // ...
+  }
+  // ... implement remaining methods
+}
+
+const client = new ZkpAuthClient({
+  baseUrl: '...',
+  storage: new WebAuthnKeyStorage(), // no other changes required
+});
 ```
 
 ---
@@ -523,7 +629,13 @@ client.exportKey(): Uint8Array
 #### Client error classes
 
 ```ts
-import { ZkpClientError, ZkpCryptoError, ZkpNetworkError, ZkpServerError } from '@zkp-auth/client';
+import {
+  ZkpClientError,
+  ZkpCryptoError,
+  ZkpNetworkError,
+  ZkpServerError,
+  ZkpStorageError,
+} from '@zkp-auth/client';
 import type { ClientErrorCode } from '@zkp-auth/client';
 ```
 
@@ -531,14 +643,39 @@ All extend `ZkpClientError` and expose `.code`. Narrow with `instanceof`:
 
 ```ts
 try {
-  await client.login(username, password);
+  await client.login(username, pin);
 } catch (err) {
-  if (err instanceof ZkpServerError && err.code === 'PROOF_REJECTED') {
-    showError('Wrong username or password.');
+  if (err instanceof ZkpCryptoError && err.code === 'DECRYPTION_FAILED') {
+    showError('Wrong PIN. Please try again.');
+  } else if (err instanceof ZkpStorageError && err.code === 'KEY_NOT_FOUND') {
+    showError('No account found on this device. Register first.');
+  } else if (err instanceof ZkpServerError && err.code === 'PROOF_REJECTED') {
+    showError('Authentication failed.');
   } else if (err instanceof ZkpNetworkError) {
     showError('Network unavailable — please try again.');
   }
 }
+```
+
+**All error codes**
+
+```ts
+type ClientErrorCode =
+  // Crypto
+  | 'INVALID_USERNAME'
+  | 'INVALID_PIN'
+  | 'RNG_FAILURE'
+  | 'CURVE_ERROR'
+  | 'DECRYPTION_FAILED'
+  // Storage
+  | 'KEY_NOT_FOUND'
+  | 'STORAGE_ERROR'
+  // Network / Server
+  | 'NETWORK_ERROR'
+  | 'REGISTER_FAILED'
+  | 'CHALLENGE_FAILED'
+  | 'PROOF_REJECTED'
+  | 'SERVER_ERROR';
 ```
 
 ---
@@ -561,7 +698,7 @@ Mount once near the root of your application. Creates a single `ZkpAuthClient` i
 import { ZKPProvider } from '@zkp-auth/react';
 
 interface ZKPProviderProps {
-  options:  ZkpAuthClientOptions; // { baseUrl: string }
+  options:  ZkpAuthClientOptions; // { baseUrl: string; storage?: KeyStorage }
   children: ReactNode;
 }
 ```
@@ -576,7 +713,7 @@ root.render(
 ```
 
 ::: warning One provider only
-Mount `ZKPProvider` exactly once. Multiple providers create separate `ZkpAuthClient` instances with separate in-memory keys — logins in one subtree will not be visible in another.
+Mount `ZKPProvider` exactly once. Multiple providers create separate `ZkpAuthClient` instances with separate storage references — logins in one subtree will not be visible in another.
 :::
 
 ---
@@ -596,14 +733,15 @@ function useZKPAuth(): ZKPAuthHookResult
 ```ts
 interface ZKPContextValue {
   // ── State ──────────────────────────────────────────────────
-  user:            ZKPUser | null;       // authenticated user, or null
-  isAuthenticated: boolean;              // true after successful login()
-  loading:         boolean;              // true while an op is in flight
+  user:            ZKPUser | null;        // authenticated user, or null
+  isAuthenticated: boolean;               // true after successful login()
+  loading:         boolean;               // true while an op is in flight
   error:           ZkpClientError | null; // last error, or null
 
   // ── Operations ─────────────────────────────────────────────
-  register(username: string, password: string): Promise<void>;
-  login(username: string, password: string):    Promise<void>;
+  register(username: string, pin: string): Promise<void>;
+  login(username: string, pin: string):    Promise<void>;
+  hasLocalKey(userId: string):             Promise<boolean>;
   logout(): void;
 }
 
@@ -626,13 +764,13 @@ interface ZKPUser {
 | Any operation fails | unchanged | unchanged | `false` | **set** |
 | `logout()` | `null` | `false` | `false` | `null` |
 
-**Example**
+**Example — adaptive register / login form**
 
 ```tsx
 import { useZKPAuth } from '@zkp-auth/react';
 
-function LoginForm() {
-  const { login, loading, error, isAuthenticated, user } = useZKPAuth();
+function AuthForm() {
+  const { register, login, hasLocalKey, loading, error, isAuthenticated, user } = useZKPAuth();
 
   if (isAuthenticated) return <p>Welcome, {user?.userId}</p>;
 
@@ -640,11 +778,16 @@ function LoginForm() {
     <form onSubmit={async (e) => {
       e.preventDefault();
       const f = new FormData(e.currentTarget);
-      await login(f.get('username') as string, f.get('password') as string);
+      const username = f.get('username') as string;
+      const pin      = f.get('pin') as string;
+
+      // Route to register vs. login based on whether the device has a key
+      const exists = await hasLocalKey(username);
+      exists ? await login(username, pin) : await register(username, pin);
     }}>
       <input name="username" required />
-      <input name="password" type="password" />
-      <button disabled={loading}>{loading ? 'Logging in…' : 'Log in'}</button>
+      <input name="pin" type="password" placeholder="PIN (stays on device)" />
+      <button disabled={loading}>{loading ? 'Authenticating…' : 'Continue'}</button>
       {error && <p role="alert">{error.message} ({error.code})</p>}
     </form>
   );
@@ -655,23 +798,20 @@ function LoginForm() {
 
 ### `useZKPUser()`
 
-Convenience hook. Returns `user` and `isAuthenticated` only — useful for read-only components that don't need operations.
+Convenience hook. Returns the current user only — useful for read-only components.
 
 ```ts
 import { useZKPUser } from '@zkp-auth/react';
 
-function useZKPUser(): {
-  user:            ZKPUser | null;
-  isAuthenticated: boolean;
-}
+function useZKPUser(): ZKPUser | null
 ```
 
 **Example**
 
 ```tsx
 function Navbar() {
-  const { user, isAuthenticated } = useZKPUser();
-  return isAuthenticated ? <span>{user!.userId}</span> : <a href="/login">Log in</a>;
+  const user = useZKPUser();
+  return user ? <span>{user.userId}</span> : <a href="/login">Log in</a>;
 }
 ```
 

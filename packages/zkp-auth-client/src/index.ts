@@ -5,9 +5,11 @@
 // their APIs may change without a semver bump.
 //
 // Public surface:
-//   Class   : ZkpAuthClient
-//   Types   : ZkpAuthClientOptions, RegisterOutcome, LoginOutcome
-//   Errors  : ZkpClientError, ZkpCryptoError, ZkpNetworkError, ZkpServerError
+//   Classes  : ZkpAuthClient, IndexedDBKeyStorage, MemoryKeyStorage
+//   Interface: KeyStorage
+//   Types    : ZkpAuthClientOptions, RegisterOutcome, LoginOutcome
+//   Errors   : ZkpClientError, ZkpCryptoError, ZkpNetworkError,
+//              ZkpServerError, ZkpStorageError
 //   Error type: ClientErrorCode
 
 // ── Client class and its option/result types ──────────────────────────────
@@ -18,11 +20,16 @@ export type {
   LoginOutcome,
 } from './client.js';
 
+// ── Key storage interface and implementations ─────────────────────────────
+export { IndexedDBKeyStorage, MemoryKeyStorage } from './key-storage.js';
+export type { KeyStorage } from './key-storage.js';
+
 // ── Error classes and the stable code union ───────────────────────────────
 export {
   ZkpClientError,
   ZkpCryptoError,
   ZkpNetworkError,
   ZkpServerError,
+  ZkpStorageError,
 } from './errors.js';
-export type { ClientErrorCode } from './errors.js';
+export type { ClientErrorCode } from './errors.js';

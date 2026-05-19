@@ -13,6 +13,7 @@ import {
   MissingFieldError,
   InvalidEncodingError,
   InternalError,
+  RegistrationFailedError,
   ServerError,
 } from '../errors.js';
 import type { ZkpRegisterOptions } from '../types.js';
@@ -28,6 +29,29 @@ export interface RegisterResult {
   /** The user identifier that was registered. */
   userId: string;
 }
+
+// ---------------------------------------------------------------------------
+// Security constants / internal option shape
+// ---------------------------------------------------------------------------
+
+/**
+ * Minimum wall-clock duration for every register attempt. This is a floor, not
+ * a hard real-time guarantee; it prevents the obvious fast duplicate-vs-create
+ * distinction while the middleware layer adds rate limits and audit logging.
+ */
+const DEFAULT_MIN_REGISTER_RESPONSE_MS = 150;
+
+type RegisterOptionsWithLookup = ZkpRegisterOptions & {
+  /**
+   * Required for secure registration. The public type is updated in a later
+   * pass; this local shape lets the core fail closed immediately.
+   */
+  getPublicKey?: (userId: string) => Promise<Uint8Array | null>;
+  /**
+   * Test/custom-adapter escape hatch for the fixed response-time floor.
+   */
+  minRegisterResponseMs?: number;
+};
 
 // ---------------------------------------------------------------------------
 // Handler
@@ -50,6 +74,19 @@ export interface RegisterResult {
  * @throws        `ServerError` subclass on any validation failure.
  */
 export async function handleRegister(
+  body: unknown,
+  options: ZkpRegisterOptions,
+): Promise<RegisterResult> {
+  const startedAt = Date.now();
+
+  try {
+    return await handleRegisterInner(body, options);
+  } finally {
+    await waitForMinimumRegisterDuration(startedAt, options);
+  }
+}
+
+async function handleRegisterInner(
   body: unknown,
   options: ZkpRegisterOptions,
 ): Promise<RegisterResult> {
@@ -88,10 +125,16 @@ export async function handleRegister(
     );
   }
 
-  // ── 4. Persist via caller-supplied hook ────────────────────────────────────
+  // ── 4. Reject duplicate registration before any write ─────────────────────
+  await assertUserIsNotRegistered(userId, options);
+
+  // ── 5. Persist via caller-supplied hook ────────────────────────────────────
   try {
     await options.savePublicKey(userId, publicKey);
   } catch (e) {
+    if (e instanceof RegistrationFailedError) {
+      throw e;
+    }
     throw new InternalError(
       `savePublicKey threw: ${e instanceof Error ? e.message : String(e)}`,
     );
@@ -147,6 +190,54 @@ function decodePublicKeyHex(hex: string): Uint8Array {
     );
   }
   return Uint8Array.from(Buffer.from(hex, 'hex'));
+}
+
+/**
+ * Fail closed unless the caller exposes a read-before-write hook. Without this
+ * check, `savePublicKey` implementations using `set` / `upsert` can overwrite
+ * an existing account's authentication key.
+ */
+async function assertUserIsNotRegistered(
+  userId: string,
+  options: ZkpRegisterOptions,
+): Promise<void> {
+  const secureOptions = options as RegisterOptionsWithLookup;
+  if (typeof secureOptions.getPublicKey !== 'function') {
+    throw new RegistrationFailedError();
+  }
+
+  let existing: Uint8Array | null;
+  try {
+    existing = await secureOptions.getPublicKey(userId);
+  } catch (e) {
+    throw new InternalError(
+      `getPublicKey threw during register: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+
+  if (existing === null) {
+    return;
+  }
+
+  throw new RegistrationFailedError();
+}
+
+async function waitForMinimumRegisterDuration(
+  startedAt: number,
+  options: ZkpRegisterOptions,
+): Promise<void> {
+  const configured = (options as RegisterOptionsWithLookup).minRegisterResponseMs;
+  const minimumMs =
+    typeof configured === 'number' && Number.isFinite(configured) && configured >= 0
+      ? configured
+      : DEFAULT_MIN_REGISTER_RESPONSE_MS;
+  const remainingMs = minimumMs - (Date.now() - startedAt);
+  if (remainingMs <= 0) {
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, remainingMs);
+  });
 }
 
 export { ServerError };

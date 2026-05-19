@@ -67,9 +67,19 @@ async function postLogout(): Promise<void> {
  *     is called again to obtain the userId and expiresAt from the cookie.
  *   - Logout clears the cookie via POST /api/logout then resets local state.
  *   - The JWT is never stored in React state, localStorage, or any JS variable.
+ *   - The PIN is passed only to login() / register() and is never stored.
  */
 export function App(): JSX.Element {
-  const { isAuthenticated, login, register, logout: zkpLogout, loading: zkpLoading, error: zkpError, user: zkpUser } = useZKPAuth();
+  const {
+    isAuthenticated,
+    login,
+    register,
+    hasLocalKey,
+    logout: zkpLogout,
+    loading: zkpLoading,
+    error: zkpError,
+    user: zkpUser,
+  } = useZKPAuth();
 
   const [session, setSession] = useState<Session>({ status: 'checking', user: null });
   const [view, setView] = useState<UnauthView>('login');
@@ -115,8 +125,8 @@ export function App(): JSX.Element {
   // ── Logout ───────────────────────────────────────────────────────────────
 
   const handleLogout = useCallback(async () => {
-    await postLogout();       // clear the HttpOnly cookie
-    zkpLogout();              // zero private key from ZkpAuthClient memory
+    await postLogout();   // clear the HttpOnly cookie
+    zkpLogout();          // clear any in-memory ZKP client state
     setSession({ status: 'unauthenticated', user: null });
   }, [zkpLogout]);
 

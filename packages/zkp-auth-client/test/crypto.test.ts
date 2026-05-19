@@ -2,18 +2,16 @@
 //
 // Tier: Unit
 // Covers: browserGenerateKeyPair, browserComputeProof,
-//         validateUsername, encodePassword, Fiat-Shamir scalar
-// Environment: jsdom (provides globalThis.crypto via @vitest/browser or jsdom)
+//         validateUsername, validatePin, Fiat-Shamir scalar
+// Environment: jsdom (provides globalThis.crypto via jsdom)
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   browserGenerateKeyPair,
-  browserDeriveKeyPair,
   browserComputeProof,
   validateUsername,
-  encodePassword,
+  validatePin,
   MAX_USERNAME_BYTES,
-  MAX_PASSWORD_BYTES,
   _internals,
 } from '../src/crypto.js';
 import { ZkpCryptoError } from '../src/errors.js';
@@ -54,31 +52,26 @@ describe('validateUsername', () => {
   });
 });
 
-// ── encodePassword ────────────────────────────────────────────────────────────
+// ── validatePin ───────────────────────────────────────────────────────────────
 
-describe('encodePassword', () => {
-  it('returns a Uint8Array for a normal password', () => {
-    const bytes = encodePassword('hunter2');
-    // Use ArrayBuffer.isView to avoid jsdom cross-realm instanceof mismatch.
-    expect(ArrayBuffer.isView(bytes)).toBe(true);
-    expect(bytes.byteLength).toBe(7);
+describe('validatePin', () => {
+  it('accepts a non-empty PIN', () => {
+    expect(() => validatePin('123456')).not.toThrow();
+    expect(() => validatePin('my-passphrase')).not.toThrow();
+    expect(() => validatePin('a')).not.toThrow();
   });
 
-  it('accepts an empty password', () => {
-    const bytes = encodePassword('');
-    expect(bytes.byteLength).toBe(0);
+  it('throws ZkpCryptoError(INVALID_PIN) for an empty string', () => {
+    expect(() => validatePin('')).toThrow(ZkpCryptoError);
+    try { validatePin(''); } catch (e) {
+      expect((e as ZkpCryptoError).code).toBe('INVALID_PIN');
+    }
   });
 
-  it('accepts a password exactly at the byte limit', () => {
-    const atLimit = 'a'.repeat(MAX_PASSWORD_BYTES);
-    expect(() => encodePassword(atLimit)).not.toThrow();
-  });
-
-  it('rejects a password one byte over the limit', () => {
-    const overLimit = 'a'.repeat(MAX_PASSWORD_BYTES + 1);
-    expect(() => encodePassword(overLimit)).toThrow(ZkpCryptoError);
-    try { encodePassword(overLimit); } catch (e) {
-      expect((e as ZkpCryptoError).code).toBe('INVALID_PASSWORD');
+  it('throws ZkpCryptoError(INVALID_PIN) for a non-string', () => {
+    expect(() => validatePin(null as unknown as string)).toThrow(ZkpCryptoError);
+    try { validatePin(123 as unknown as string); } catch (e) {
+      expect((e as ZkpCryptoError).code).toBe('INVALID_PIN');
     }
   });
 });
@@ -115,7 +108,7 @@ describe('browserGenerateKeyPair', () => {
   it('two successive calls produce different keys', () => {
     const kp1 = browserGenerateKeyPair();
     const kp2 = browserGenerateKeyPair();
-    // The probability of collision is ≈ 2^-252 — treat equal as a test bug.
+    // Collision probability ≈ 2^-252 — treat equal as a test bug.
     expect(Buffer.from(kp1.privateKey).equals(Buffer.from(kp2.privateKey))).toBe(false);
   });
 
@@ -127,7 +120,6 @@ describe('browserGenerateKeyPair', () => {
   });
 
   it('throws ZkpCryptoError(RNG_FAILURE) when getRandomValues is broken', () => {
-    // Capture the spy reference so mockRestore() targets the right spy.
     const spy = vi.spyOn(globalThis.crypto, 'getRandomValues').mockImplementation(() => {
       throw new DOMException('mocked CSPRNG failure', 'SecurityError');
     });
@@ -148,7 +140,6 @@ describe('browserComputeProof', () => {
   let privateKey: Uint8Array;
   let publicKey: Uint8Array;
   let challenge: Uint8Array;
-  const password = new TextEncoder().encode('testpassword');
 
   beforeEach(() => {
     const kp = browserGenerateKeyPair();
@@ -162,19 +153,19 @@ describe('browserComputeProof', () => {
   });
 
   it('returns a 64-byte Uint8Array', () => {
-    const proof = browserComputeProof(privateKey, password, challenge);
+    const proof = browserComputeProof(privateKey, challenge);
     expect(proof).toBeInstanceOf(Uint8Array);
     expect(proof.byteLength).toBe(64);
   });
 
   it('R_bytes (first 32) decodes as a valid Ed25519 point', () => {
-    const proof = browserComputeProof(privateKey, password, challenge);
+    const proof = browserComputeProof(privateKey, challenge);
     const R_bytes = proof.slice(0, 32);
     expect(() => ed25519.Point.fromBytes(R_bytes)).not.toThrow();
   });
 
   it('s_bytes (last 32) is a scalar in [0, L)', () => {
-    const proof = browserComputeProof(privateKey, password, challenge);
+    const proof = browserComputeProof(privateKey, challenge);
     const s_bytes = proof.slice(32);
     const s = bytesToNumberLE(s_bytes);
     expect(s >= 0n).toBe(true);
@@ -182,7 +173,7 @@ describe('browserComputeProof', () => {
   });
 
   it('proof verifies under Schnorr equation: s·G == R + c·publicKey', () => {
-    const proof = browserComputeProof(privateKey, password, challenge);
+    const proof = browserComputeProof(privateKey, challenge);
     const R_bytes = proof.slice(0, 32);
     const s_bytes = proof.slice(32);
 
@@ -197,51 +188,30 @@ describe('browserComputeProof', () => {
     expect(lhs.equals(rhs)).toBe(true);
   });
 
-  it('password is not mixed into the proof (two passwords → same proof for same nonce)', () => {
-    // We cannot fix the nonce in production, but we can verify that
-    // two proofs with different passwords are both valid under the equation.
-    // A stricter byte-equality test requires the __forTesting__ hook from core
-    // and is deferred to integration tests.
-    const proof1 = browserComputeProof(privateKey, new TextEncoder().encode('pass1'), challenge);
-    const proof2 = browserComputeProof(privateKey, new TextEncoder().encode('pass2'), challenge);
-
-    // Both must be 64 bytes and verify correctly (even if the nonce differs).
-    expect(proof1.byteLength).toBe(64);
-    expect(proof2.byteLength).toBe(64);
-
-    for (const proof of [proof1, proof2]) {
-      const R = ed25519.Point.fromBytes(proof.slice(0, 32));
-      const s = bytesToNumberLE(proof.slice(32));
-      const c = _internals.computeFiatShamirScalar(proof.slice(0, 32), publicKey, challenge);
-      expect(ed25519.Point.BASE.multiply(s).equals(R.add(ed25519.Point.fromBytes(publicKey).multiply(c)))).toBe(true);
-    }
-  });
-
   it('throws ZkpCryptoError(CURVE_ERROR) when privateKey is zero', () => {
     const zeroKey = new Uint8Array(32);
-    expect(() => browserComputeProof(zeroKey, password, challenge)).toThrow(ZkpCryptoError);
-    try { browserComputeProof(zeroKey, password, challenge); } catch (e) {
+    expect(() => browserComputeProof(zeroKey, challenge)).toThrow(ZkpCryptoError);
+    try { browserComputeProof(zeroKey, challenge); } catch (e) {
       expect((e as ZkpCryptoError).code).toBe('CURVE_ERROR');
     }
   });
 
   it('throws ZkpCryptoError(CURVE_ERROR) when privateKey scalar >= L', () => {
-    // Encode L itself into 32 bytes LE — it is >= L, must be rejected.
     const lBytes = new Uint8Array(32);
     let tmp = L;
     for (let i = 0; i < 32; i++) {
       lBytes[i] = Number(tmp & 0xffn);
       tmp >>= 8n;
     }
-    expect(() => browserComputeProof(lBytes, password, challenge)).toThrow(ZkpCryptoError);
-    try { browserComputeProof(lBytes, password, challenge); } catch (e) {
+    expect(() => browserComputeProof(lBytes, challenge)).toThrow(ZkpCryptoError);
+    try { browserComputeProof(lBytes, challenge); } catch (e) {
       expect((e as ZkpCryptoError).code).toBe('CURVE_ERROR');
     }
   });
 
   it('two proofs over the same inputs differ (fresh nonce each time)', () => {
-    const proof1 = browserComputeProof(privateKey, password, challenge);
-    const proof2 = browserComputeProof(privateKey, password, challenge);
+    const proof1 = browserComputeProof(privateKey, challenge);
+    const proof2 = browserComputeProof(privateKey, challenge);
     // R_bytes should differ (different random nonces).
     expect(Buffer.from(proof1.slice(0, 32)).equals(Buffer.from(proof2.slice(0, 32)))).toBe(false);
   });
@@ -277,60 +247,5 @@ describe('computeFiatShamirScalar (internal)', () => {
     expect(_internals.computeFiatShamirScalar(R, pub, ch1)).not.toBe(
       _internals.computeFiatShamirScalar(R, pub, ch2),
     );
-  });
-});
-/** Low iteration count for test speed. Production uses 600_000. */
-const TEST_PBKDF2_ITERS = 1_000;
-
-describe('browserDeriveKeyPair', () => {
-  it('returns privateKey and publicKey as Uint8Array(32)', async () => {
-    const { privateKey, publicKey } = await browserDeriveKeyPair('alice', 'secret', TEST_PBKDF2_ITERS);
-    expect(ArrayBuffer.isView(privateKey)).toBe(true);
-    expect(ArrayBuffer.isView(publicKey)).toBe(true);
-    expect(privateKey.byteLength).toBe(32);
-    expect(publicKey.byteLength).toBe(32);
-  });
-
-  it('privateKey scalar is in [1, L)', async () => {
-    const { privateKey } = await browserDeriveKeyPair('alice', 'secret', TEST_PBKDF2_ITERS);
-    const n = bytesToNumberLE(privateKey);
-    expect(n >= 1n).toBe(true);
-    expect(n < L).toBe(true);
-  });
-
-  it('publicKey is a valid Ed25519 point', async () => {
-    const { publicKey } = await browserDeriveKeyPair('alice', 'secret', TEST_PBKDF2_ITERS);
-    expect(() => ed25519.Point.fromBytes(publicKey)).not.toThrow();
-  });
-
-  it('is deterministic — same credentials always produce the same keypair', async () => {
-    const kp1 = await browserDeriveKeyPair('alice', 'secret', TEST_PBKDF2_ITERS);
-    const kp2 = await browserDeriveKeyPair('alice', 'secret', TEST_PBKDF2_ITERS);
-    expect(Buffer.from(kp1.privateKey).equals(Buffer.from(kp2.privateKey))).toBe(true);
-    expect(Buffer.from(kp1.publicKey).equals(Buffer.from(kp2.publicKey))).toBe(true);
-  });
-
-  it('different passwords produce different keypairs', async () => {
-    const kp1 = await browserDeriveKeyPair('alice', 'secret1', TEST_PBKDF2_ITERS);
-    const kp2 = await browserDeriveKeyPair('alice', 'secret2', TEST_PBKDF2_ITERS);
-    expect(Buffer.from(kp1.privateKey).equals(Buffer.from(kp2.privateKey))).toBe(false);
-  });
-
-  it('different usernames produce different keypairs (same password)', async () => {
-    const kp1 = await browserDeriveKeyPair('alice', 'secret', TEST_PBKDF2_ITERS);
-    const kp2 = await browserDeriveKeyPair('bob', 'secret', TEST_PBKDF2_ITERS);
-    expect(Buffer.from(kp1.privateKey).equals(Buffer.from(kp2.privateKey))).toBe(false);
-  });
-
-  it('publicKey equals privateKey_scalar · G', async () => {
-    const { privateKey, publicKey } = await browserDeriveKeyPair('alice', 'secret', TEST_PBKDF2_ITERS);
-    const scalar = bytesToNumberLE(privateKey);
-    const expected = ed25519.Point.BASE.multiply(scalar).toBytes();
-    expect(Buffer.from(publicKey).equals(Buffer.from(expected))).toBe(true);
-  });
-
-  it('_internals.PBKDF2_ITERATIONS is a positive integer', () => {
-    expect(typeof _internals.PBKDF2_ITERATIONS).toBe('number');
-    expect(_internals.PBKDF2_ITERATIONS).toBeGreaterThan(0);
   });
 });

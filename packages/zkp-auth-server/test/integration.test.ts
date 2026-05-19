@@ -44,9 +44,16 @@ import {
   zkpRegister,
   zkpChallenge,
   zkpVerify,
+  zkpRekey,
   InMemoryChallengeStore,
+  createAuditLogger,
+  createRateLimiter,
+  createRegistrationRateLimiter,
+  RegistrationFailedError,
 } from '../src/index.js';
 import type { IChallengeStore } from '../src/index.js';
+import { hashUsername } from '../src/index.js';
+import type { AuditRecord } from '../src/index.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -66,14 +73,29 @@ function buildApp(
   const app = express();
   app.use(express.json());
 
+  const authRateLimiter = createRateLimiter();
+  const registrationRateLimiter = createRegistrationRateLimiter();
+  const noopAuditLogger = createAuditLogger({
+    write: () => undefined,
+  });
+
   app.post(
     '/auth/register',
     zkpRegister({
-      savePublicKey: async (userId, key) => { keyDb.set(userId, key); },
+      getPublicKey: async (userId) => keyDb.get(userId) ?? null,
+      savePublicKey: async (userId, key) => {
+        if (keyDb.has(userId)) {
+          throw new RegistrationFailedError();
+        }
+        keyDb.set(userId, key);
+      },
+      minRegisterResponseMs: 0,
+      auditLogger: noopAuditLogger,
+      registrationRateLimiter,
     }),
   );
 
-  app.post('/auth/challenge', zkpChallenge({ store }));
+  app.post('/auth/challenge', zkpChallenge({ store, authRateLimiter }));
 
   app.post(
     '/auth/verify',
@@ -81,6 +103,7 @@ function buildApp(
       getPublicKey: async (userId) => keyDb.get(userId) ?? null,
       store,
       jwtSecret: JWT_SECRET,
+      authRateLimiter,
     }),
     // Route handler that sends the token — verifyMiddleware calls next() on success.
     (req, res) => {
@@ -90,6 +113,18 @@ function buildApp(
         userId: req.zkpUser?.userId,
       });
     },
+  );
+
+  app.post(
+    '/auth/rekey',
+    zkpRekey({
+      getPublicKey: async (userId) => keyDb.get(userId) ?? null,
+      savePublicKey: async (userId, key) => {
+        keyDb.set(userId, key);
+      },
+      store,
+      authRateLimiter,
+    }),
   );
 
   return app;
@@ -213,12 +248,66 @@ describe('POST /auth/register', () => {
     expect((res.body as { error: { code: string } }).error.code).toBe('INVALID_ENCODING');
   });
 
-  it('register_sameUserTwice_secondCallSucceeds', async () => {
+  it('register_sameUserTwice_secondCallRejectsWithoutOverwritingKey', async () => {
     const { publicKey } = generateKeyPair();
+    const attacker = generateKeyPair();
     const hex = Buffer.from(publicKey).toString('hex');
+    const attackerHex = Buffer.from(attacker.publicKey).toString('hex');
 
     await request(app).post('/auth/register').send({ userId: 'alice', publicKeyHex: hex }).expect(201);
-    await request(app).post('/auth/register').send({ userId: 'alice', publicKeyHex: hex }).expect(201);
+    const res = await request(app)
+      .post('/auth/register')
+      .send({ userId: 'alice', publicKeyHex: attackerHex })
+      .expect(409);
+
+    expect((res.body as { error: { code: string; message: string } }).error.code).toBe(
+      'REGISTRATION_FAILED',
+    );
+    expect((res.body as { error: { code: string; message: string } }).error.message).toBe(
+      'registration failed',
+    );
+    expect(Buffer.from(keyDb.get('alice') ?? new Uint8Array()).toString('hex')).toBe(hex);
+  });
+
+  it('register_storageDuplicateConflict_returns409WithoutOverwritingKey', async () => {
+    const { publicKey } = generateKeyPair();
+    const attacker = generateKeyPair();
+    const hex = Buffer.from(publicKey).toString('hex');
+    const attackerHex = Buffer.from(attacker.publicKey).toString('hex');
+    let lookupCount = 0;
+
+    const raceApp = express();
+    raceApp.use(express.json());
+    raceApp.post(
+      '/auth/register',
+      zkpRegister({
+        getPublicKey: async () => {
+          lookupCount += 1;
+          return lookupCount === 1 ? null : publicKey;
+        },
+        savePublicKey: async () => {
+          throw new RegistrationFailedError();
+        },
+        minRegisterResponseMs: 0,
+        auditLogger: createAuditLogger({ write: () => undefined }),
+        registrationRateLimiter: createRegistrationRateLimiter(),
+      }),
+    );
+
+    keyDb.set('alice', publicKey);
+
+    const res = await request(raceApp)
+      .post('/auth/register')
+      .send({ userId: 'alice', publicKeyHex: attackerHex })
+      .expect(409);
+
+    expect((res.body as { error: { code: string; message: string } }).error.code).toBe(
+      'REGISTRATION_FAILED',
+    );
+    expect((res.body as { error: { code: string; message: string } }).error.message).toBe(
+      'registration failed',
+    );
+    expect(Buffer.from(keyDb.get('alice') ?? new Uint8Array()).toString('hex')).toBe(hex);
   });
 });
 

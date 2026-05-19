@@ -1,15 +1,10 @@
 // @zkp-auth/client — typed error classes
 //
 // Single source of truth for the error taxonomy of `@zkp-auth/client`.
-// Every fault path in the SDK throws one of the three concrete subclasses
+// Every fault path in the SDK throws one of the four concrete subclasses
 // declared here, each tagged with a stable `.code` from `ClientErrorCode`.
 //
 // Design notes:
-//
-// - Crypto codes ('RNG_FAILURE', 'CURVE_ERROR', 'INVALID_USERNAME',
-//   'INVALID_PASSWORD') shadow the equivalent codes in @zkp-auth/core's
-//   `ErrorCode` union. A caller that imports both packages can narrow on
-//   a single code string without knowing which package threw.
 //
 // - `Object.setPrototypeOf(this, new.target.prototype)` is called in every
 //   constructor so that `instanceof` works correctly after TypeScript
@@ -28,22 +23,28 @@
  *
  * Callers MUST pattern-match on `.code`; `.message` is for humans only.
  *
- * - `'INVALID_USERNAME'` — username is empty or exceeds the allowed length.
- * - `'INVALID_PASSWORD'` — password exceeds 4 096 UTF-8 bytes.
- * - `'RNG_FAILURE'`      — `crypto.getRandomValues` threw or the rejection-
- *                          sampling loop exhausted its iteration cap.
- * - `'CURVE_ERROR'`      — `@noble/curves` raised an unexpected internal error.
- * - `'NETWORK_ERROR'`    — `fetch()` itself rejected (offline, CORS, etc.).
- * - `'REGISTER_FAILED'`  — server rejected the registration request.
- * - `'CHALLENGE_FAILED'` — server did not issue a challenge.
- * - `'PROOF_REJECTED'`   — server's cryptographic verification returned false.
- * - `'SERVER_ERROR'`     — server returned an unexpected status or body.
+ * - `'INVALID_USERNAME'`   — username is empty or exceeds the allowed length.
+ * - `'INVALID_PIN'`        — PIN is empty.
+ * - `'RNG_FAILURE'`        — `crypto.getRandomValues` threw or the rejection-
+ *                            sampling loop exhausted its iteration cap.
+ * - `'CURVE_ERROR'`        — `@noble/curves` raised an unexpected internal error.
+ * - `'DECRYPTION_FAILED'`  — wrong PIN; AES-GCM authentication tag mismatch.
+ * - `'STORAGE_ERROR'`      — IndexedDB read/write failed.
+ * - `'KEY_NOT_FOUND'`      — no stored key exists for the given userId.
+ * - `'NETWORK_ERROR'`      — `fetch()` itself rejected (offline, CORS, etc.).
+ * - `'REGISTER_FAILED'`    — server rejected the registration request.
+ * - `'CHALLENGE_FAILED'`   — server did not issue a challenge.
+ * - `'PROOF_REJECTED'`     — server's cryptographic verification returned false.
+ * - `'SERVER_ERROR'`       — server returned an unexpected status or body.
  */
 export type ClientErrorCode =
   | 'INVALID_USERNAME'
-  | 'INVALID_PASSWORD'
+  | 'INVALID_PIN'
   | 'RNG_FAILURE'
   | 'CURVE_ERROR'
+  | 'DECRYPTION_FAILED'
+  | 'STORAGE_ERROR'
+  | 'KEY_NOT_FOUND'
   | 'NETWORK_ERROR'
   | 'REGISTER_FAILED'
   | 'CHALLENGE_FAILED'
@@ -74,26 +75,27 @@ export class ZkpClientError extends Error {
 /**
  * Thrown when an internal browser-crypto operation fails.
  *
- * Covers four codes:
+ * Covers five codes:
  *
- * - `'INVALID_USERNAME'` — the `username` argument is an empty string or
+ * - `'INVALID_USERNAME'`  — the `username` argument is an empty string or
  *   exceeds `MAX_USERNAME_BYTES` (256 UTF-8 bytes).
- * - `'INVALID_PASSWORD'` — the `password` argument exceeds 4 096 UTF-8 bytes,
- *   the limit enforced by `computeProof` in `@zkp-auth/core`.
- * - `'RNG_FAILURE'`      — `crypto.getRandomValues()` threw, returned a short
+ * - `'INVALID_PIN'`       — the `pin` argument is an empty string.
+ * - `'RNG_FAILURE'`       — `crypto.getRandomValues()` threw, returned a short
  *   buffer, or the rejection-sampling loop exhausted 256 iterations.
- * - `'CURVE_ERROR'`      — `@noble/curves` raised an unexpected error during
+ * - `'CURVE_ERROR'`       — `@noble/curves` raised an unexpected error during
  *   a point encode/decode or scalar-multiply operation.
+ * - `'DECRYPTION_FAILED'` — AES-GCM authentication tag mismatch; the PIN is
+ *   incorrect or the stored ciphertext is corrupt.
  *
  * The underlying error (if any) is attached as `.cause` for diagnostics.
  *
  * @example
  * ```ts
  * try {
- *   await client.register('alice', 'hunter2');
+ *   await client.login('alice', '000000');
  * } catch (e) {
- *   if (e instanceof ZkpCryptoError && e.code === 'RNG_FAILURE') {
- *     console.error('Browser CSPRNG unavailable', e.cause);
+ *   if (e instanceof ZkpCryptoError && e.code === 'DECRYPTION_FAILED') {
+ *     alert('Wrong PIN.');
  *   }
  * }
  * ```
@@ -102,15 +104,15 @@ export class ZkpCryptoError extends ZkpClientError {
   override readonly name = 'ZkpCryptoError';
 
   /**
-   * @param code    One of `'INVALID_USERNAME'`, `'INVALID_PASSWORD'`,
-   *                `'RNG_FAILURE'`, or `'CURVE_ERROR'`.
+   * @param code    One of `'INVALID_USERNAME'`, `'INVALID_PIN'`,
+   *                `'RNG_FAILURE'`, `'CURVE_ERROR'`, or `'DECRYPTION_FAILED'`.
    * @param message Human-readable description; not part of the stable API.
    * @param options Optional bag; `cause` is the underlying thrown value.
    */
   constructor(
     code: Extract<
       ClientErrorCode,
-      'INVALID_USERNAME' | 'INVALID_PASSWORD' | 'RNG_FAILURE' | 'CURVE_ERROR'
+      'INVALID_USERNAME' | 'INVALID_PIN' | 'RNG_FAILURE' | 'CURVE_ERROR' | 'DECRYPTION_FAILED'
     >,
     message: string,
     options?: { cause?: unknown },
@@ -206,5 +208,46 @@ export class ZkpServerError extends ZkpClientError {
     super(code, message);
     this.httpStatus = httpStatus;
     this.serverCode = serverCode;
+  }
+}
+
+/**
+ * Thrown when a key-storage backend operation fails.
+ *
+ * Covers two codes:
+ *
+ * - `'STORAGE_ERROR'`  — IndexedDB (or the active backend) threw an
+ *   unexpected error during a read, write, or delete operation.
+ * - `'KEY_NOT_FOUND'`  — no stored key exists for the requested `userId`.
+ *   The user must register before logging in on this device.
+ *
+ * @example
+ * ```ts
+ * try {
+ *   await client.login('alice', '123456');
+ * } catch (e) {
+ *   if (e instanceof ZkpStorageError && e.code === 'KEY_NOT_FOUND') {
+ *     redirectToRegister();
+ *   }
+ * }
+ * ```
+ */
+export class ZkpStorageError extends ZkpClientError {
+  override readonly name = 'ZkpStorageError';
+
+  /**
+   * @param code    `'STORAGE_ERROR'` or `'KEY_NOT_FOUND'`.
+   * @param message Human-readable description; not part of the stable API.
+   * @param options Optional bag; `cause` is the underlying thrown value.
+   */
+  constructor(
+    code: Extract<ClientErrorCode, 'STORAGE_ERROR' | 'KEY_NOT_FOUND'>,
+    message: string,
+    options?: { cause?: unknown },
+  ) {
+    super(code, message);
+    if (options?.cause !== undefined) {
+      (this as { cause?: unknown }).cause = options.cause;
+    }
   }
 }

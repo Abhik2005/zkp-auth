@@ -7,8 +7,8 @@ import { Spinner } from '../components/Spinner.js';
 interface RegisterPageProps {
   readonly onSwitchToLogin: () => void;
   readonly onRegistered: () => void;
-  /** `register()` from useZKPAuth, passed down from App. */
-  readonly register: (username: string, password: string) => Promise<void>;
+  /** `register(username, pin)` from useZKPAuth, passed down from App. */
+  readonly register: (username: string, pin: string) => Promise<void>;
   readonly loading: boolean;
   readonly error: ZkpClientError | null;
   /** `user` from useZKPAuth — becomes non-null after successful registration. */
@@ -18,9 +18,11 @@ interface RegisterPageProps {
 /**
  * Registration page.
  *
- * Generates an Ed25519 keypair in-browser, posts the public key to the server.
- * After success, `user` from the hook becomes non-null → `onRegistered()` fires
- * → App navigates to the login page.
+ * Generates a random Ed25519 keypair in the browser, encrypts the private key
+ * with Argon2id + AES-256-GCM using the user's PIN, stores the encrypted blob
+ * in IndexedDB, and posts only the public key to the server.
+ *
+ * The PIN is never transmitted — it only unlocks the local key store.
  */
 export function RegisterPage({
   onSwitchToLogin,
@@ -31,8 +33,8 @@ export function RegisterPage({
   user,
 }: RegisterPageProps): JSX.Element {
   const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
-  const [confirmPassword, setConfirmPassword] = useState('');
+  const [pin, setPin] = useState('');
+  const [confirmPin, setConfirmPin] = useState('');
   const [localError, setLocalError] = useState<string | null>(null);
 
   // Navigate to login once registration succeeds (user becomes non-null).
@@ -45,11 +47,16 @@ export function RegisterPage({
   async function handleSubmit(e: FormEvent<HTMLFormElement>): Promise<void> {
     e.preventDefault();
     setLocalError(null);
-    if (password !== confirmPassword) {
-      setLocalError('Passwords do not match');
+
+    if (pin.length < 4) {
+      setLocalError('PIN must be at least 4 characters');
       return;
     }
-    await register(username, password);
+    if (pin !== confirmPin) {
+      setLocalError('PINs do not match');
+      return;
+    }
+    await register(username, pin);
   }
 
   const displayError =
@@ -73,7 +80,9 @@ export function RegisterPage({
           </div>
           <h1 className="text-3xl font-bold text-white mb-2">Create account</h1>
           <p className="text-slate-400 text-sm">
-            An Ed25519 keypair is generated locally — your password is never transmitted.
+            A random Ed25519 keypair is generated locally and encrypted with your PIN.
+            <br />
+            <span className="text-brand-400 font-medium">Your PIN never leaves this device.</span>
           </p>
         </div>
 
@@ -95,29 +104,32 @@ export function RegisterPage({
             </div>
 
             <div>
-              <label htmlFor="register-password" className="field-label">Password</label>
+              <label htmlFor="register-pin" className="field-label">
+                PIN
+                <span className="ml-2 text-slate-500 font-normal text-xs">(unlocks your key on this device)</span>
+              </label>
               <input
-                id="register-password"
+                id="register-pin"
                 type="password"
                 autoComplete="new-password"
                 required
-                placeholder="••••••••"
-                value={password}
-                onChange={(e) => { setPassword(e.target.value); }}
+                placeholder="Choose a PIN — min 4 chars"
+                value={pin}
+                onChange={(e) => { setPin(e.target.value); }}
                 className="input"
               />
             </div>
 
             <div>
-              <label htmlFor="register-confirm" className="field-label">Confirm password</label>
+              <label htmlFor="register-confirm-pin" className="field-label">Confirm PIN</label>
               <input
-                id="register-confirm"
+                id="register-confirm-pin"
                 type="password"
                 autoComplete="new-password"
                 required
-                placeholder="••••••••"
-                value={confirmPassword}
-                onChange={(e) => { setConfirmPassword(e.target.value); }}
+                placeholder="Repeat your PIN"
+                value={confirmPin}
+                onChange={(e) => { setConfirmPin(e.target.value); }}
                 className="input"
               />
             </div>
@@ -126,10 +138,21 @@ export function RegisterPage({
               <div role="alert" className="alert-error">{displayError}</div>
             )}
 
+            {/* What happens callout */}
+            <div className="rounded-lg bg-brand-950/50 border border-brand-800/40 p-3 text-xs text-slate-400 space-y-1">
+              <p className="font-medium text-brand-300 mb-1.5">What happens when you register:</p>
+              <ol className="list-decimal list-inside space-y-0.5 ml-0.5">
+                <li>A random Ed25519 keypair is generated in your browser</li>
+                <li>The private key is encrypted with Argon2id + AES-256-GCM using your PIN</li>
+                <li>The encrypted blob is stored in IndexedDB on this device</li>
+                <li>Only the 32-byte <strong className="text-slate-200">public key</strong> is sent to the server</li>
+              </ol>
+            </div>
+
             <button
               id="register-submit"
               type="submit"
-              disabled={loading || username.trim() === '' || password === ''}
+              disabled={loading || username.trim() === '' || pin === ''}
               className="btn-primary flex items-center justify-center gap-2"
             >
               {loading ? (
@@ -152,7 +175,7 @@ export function RegisterPage({
         </div>
 
         <p className="text-center text-xs text-slate-600 mt-6">
-          Schnorr Proof of Knowledge · Ed25519 · Fiat-Shamir · SHA-512
+          Schnorr Proof of Knowledge · Ed25519 · Argon2id · AES-256-GCM
         </p>
       </div>
     </div>

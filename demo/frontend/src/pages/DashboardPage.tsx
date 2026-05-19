@@ -16,7 +16,7 @@ interface DashboardPageProps {
  * and is inaccessible to JavaScript. What we show instead:
  *   - Authenticated username (from /api/me)
  *   - Session expiry (decoded from /api/me response, not from the token)
- *   - Step-by-step explanation of the ZKP + cookie auth flow
+ *   - Step-by-step explanation of the passwordless ZKP + cookie auth flow
  *   - Logout button (calls POST /api/logout to clear the cookie)
  */
 export function DashboardPage({ userId, expiresAt, onLogout }: DashboardPageProps): JSX.Element {
@@ -38,7 +38,7 @@ export function DashboardPage({ userId, expiresAt, onLogout }: DashboardPageProp
           </div>
           <h1 className="text-4xl font-bold text-white mb-2">Authenticated!</h1>
           <p className="text-slate-400">
-            You proved knowledge of your private key without revealing it.
+            You proved knowledge of your private key without ever transmitting a password.
           </p>
         </div>
 
@@ -81,16 +81,25 @@ export function DashboardPage({ userId, expiresAt, onLogout }: DashboardPageProp
             <KeyIcon className="w-5 h-5 text-emerald-400 flex-shrink-0 mt-0.5" />
             <div>
               <p className="text-emerald-300 font-semibold text-sm mb-1">
-                JWT is inaccessible to JavaScript
+                Nothing sensitive ever left your device
               </p>
               <p className="text-slate-400 text-sm leading-relaxed">
-                The session token lives in an <span className="text-slate-200 font-mono text-xs">HttpOnly; SameSite=Strict</span> cookie.
-                No JavaScript on this page — or any third-party script — can read it.
-                It is sent automatically by the browser on every request to this origin,
-                and survives full page refreshes.
+                Your private key lives in <span className="text-slate-200 font-mono text-xs">IndexedDB</span>,
+                encrypted with Argon2id + AES-256-GCM. It was decrypted only for the milliseconds needed
+                to compute the Schnorr proof, then zeroed. Your PIN was never transmitted.
+                The session token lives in an <span className="text-slate-200 font-mono text-xs">HttpOnly; SameSite=Strict</span> cookie —
+                no JavaScript can read it.
               </p>
             </div>
           </div>
+        </div>
+
+        {/* ── In-memory store caveat ── */}
+        <div className="rounded-lg bg-amber-950/30 border border-amber-800/30 px-4 py-3 text-xs text-amber-400/80">
+          <span className="font-semibold text-amber-300">Demo note:</span>{' '}
+          The backend uses an in-memory user store. Restarting the server loses all registrations.
+          If you see a “Server does not have a public key” error after a restart, simply register again —
+          your IndexedDB key blob is still on this device and you can reuse the same PIN.
         </div>
 
         {/* ── How ZKP auth works ── */}
@@ -100,12 +109,14 @@ export function DashboardPage({ userId, expiresAt, onLogout }: DashboardPageProp
           </h2>
           <ol className="space-y-3 text-sm text-slate-400">
             {([
-              ['Register', 'Browser generated an Ed25519 keypair. Public key sent to server. Private key stored in JS memory.'],
-              ['Challenge', 'Server issued a random 32-byte nonce, bound to your userId.'],
-              ['Prove', 'Browser computed a Schnorr proof: R = k·G, c = SHA-512(R‖pubKey‖nonce), s = k − c·privKey.'],
-              ['Verify', 'Server checked the proof using the public key — your password was never transmitted.'],
+              ['Register', 'Browser generated a random Ed25519 keypair. The private key was encrypted with Argon2id + AES-256-GCM using your PIN and stored in IndexedDB. Only the 32-byte public key was sent to the server.'],
+              ['Unlock', 'On login, the encrypted key blob was loaded from IndexedDB and decrypted using your PIN. Wrong PIN → AES-GCM tag mismatch → error (no server call needed).'],
+              ['Challenge', 'Server issued a random 32-byte nonce, bound to your userId and stored with a 60 s TTL.'],
+              ['Prove', 'Browser computed a Schnorr proof: r = CSPRNG(), R = r·G, c = SHA-512(R ‖ pubKey ‖ nonce) mod L, s = r + c·privKey mod L. Proof = R ‖ s (64 bytes).'],
+              ['Zero', 'The private key was unconditionally zeroed in memory (finally block). It exists in JS heap only for microseconds.'],
+              ['Verify', 'Server checked s·G == R + c·pubKey using the stored public key and the one-time nonce (now consumed). Your PIN was never transmitted.'],
               ['Cookie', 'Server signed a JWT and returned it as an HttpOnly cookie. JS cannot read it.'],
-              ['Hydrate', 'On every page load, GET /api/me reads the cookie server-side and restores your session.'],
+              ['Hydrate', 'On every page load, GET /api/me reads the cookie server-side and restores your session without another ZKP proof.'],
             ] as const).map(([step, desc], i) => (
               <li key={step} className="flex gap-3">
                 <span className="flex-shrink-0 w-6 h-6 rounded-full bg-brand-700/40 border border-brand-600/30 text-brand-400 text-xs flex items-center justify-center font-bold">
@@ -128,7 +139,7 @@ export function DashboardPage({ userId, expiresAt, onLogout }: DashboardPageProp
             onClick={onLogout}
             className="text-slate-400 hover:text-red-400 text-sm font-medium transition-colors px-4 py-2 rounded-lg hover:bg-red-950/30"
           >
-            Sign out — clear cookie &amp; private key
+            Sign out — clear cookie &amp; session
           </button>
         </div>
       </div>

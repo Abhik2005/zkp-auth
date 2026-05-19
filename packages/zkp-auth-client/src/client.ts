@@ -1,36 +1,34 @@
 // @zkp-auth/client — ZkpAuthClient: the single developer-facing class
 //
-// This module exposes the entire ZKP authentication flow as two async
-// methods on a single class instance:
+// Authentication flow:
 //
-//   client.register(username, password)
-//     → generate Ed25519 keypair (browser CSPRNG)
-//     → send publicKeyHex to POST /auth/register
-//     → store privateKey in memory
+//   client.register(username, pin)
+//     → generate random Ed25519 keypair
+//     → encrypt private key with PIN via KeyStorage (Argon2id + AES-256-GCM)
+//     → store encrypted blob in IndexedDB (or active storage backend)
+//     → POST { userId, publicKeyHex } to /auth/register
 //     → return { userId, publicKeyHex }
 //
-//   client.login(username, password)
-//     → validate inputs
-//     → fetch 32-byte challenge from POST /auth/challenge
-//     → compute 64-byte Schnorr proof (browser ZKP, privateKey in memory)
-//     → send proofHex to POST /auth/verify
+//   client.login(username, pin)
+//     → decrypt private key from KeyStorage
+//     → POST { userId } to /auth/challenge → 32-byte challenge
+//     → compute 64-byte Schnorr proof in memory
+//     → zero private key immediately after proof is assembled
+//     → POST { userId, proofHex } to /auth/verify
 //     → return { userId, token }
 //
-// The private key NEVER leaves the class instance. It is never serialised,
-// never transmitted, and never written to localStorage or any other
-// persistent store. Developers should call `clearKey()` on logout.
+// The private key lives in memory ONLY between KeyStorage.unlock() and the
+// finally block in login(). It is never cached, never serialised, and is
+// zeroed unconditionally — even when verify fails.
 //
-// LIFECYCLE NOTE:
-//   The private key lives only in the current JS heap. A page reload clears
-//   it. For multi-session support (login without re-registering) the
-//   application must export/import the key via an out-of-band channel
-//   (e.g. encrypted IndexedDB) — that is outside the scope of this SDK.
+// WebAuthn upgrade path:
+//   Pass a WebAuthnKeyStorage (implements KeyStorage) to the constructor.
+//   No other code changes required anywhere.
 
 import {
-  browserDeriveKeyPair,
   browserComputeProof,
   validateUsername,
-  encodePassword,
+  validatePin,
 } from './crypto.js';
 
 import {
@@ -42,6 +40,7 @@ import {
 } from './http.js';
 
 import { ZkpCryptoError } from './errors.js';
+import { IndexedDBKeyStorage, type KeyStorage } from './key-storage.js';
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -62,6 +61,21 @@ export interface ZkpAuthClientOptions {
    * @example ''                          // same-origin via dev proxy
    */
   baseUrl: string;
+
+  /**
+   * Key-storage backend. Defaults to `IndexedDBKeyStorage`.
+   *
+   * Swap in a `MemoryKeyStorage` (from `@zkp-auth/client`) for tests, or a
+   * future `WebAuthnKeyStorage` for hardware-backed security. The ZKP
+   * protocol and server code require no changes.
+   *
+   * @example
+   * ```ts
+   * import { MemoryKeyStorage } from '@zkp-auth/client';
+   * const client = new ZkpAuthClient({ baseUrl: '...', storage: new MemoryKeyStorage() });
+   * ```
+   */
+  storage?: KeyStorage;
 }
 
 // ── Return types ──────────────────────────────────────────────────────────────
@@ -91,31 +105,41 @@ export interface LoginOutcome {
 /**
  * Framework-agnostic browser SDK for ZKP authentication.
  *
- * Create one instance per user session and reuse it across `register` /
- * `login` calls. The instance is stateful: after `register()` succeeds the
- * private key is held in memory and used automatically by `login()`.
+ * Create one instance per application and reuse it across `register` /
+ * `login` calls. The instance holds no private key material at rest —
+ * the private key is decrypted from storage only for the duration of
+ * proof computation and zeroed immediately after.
  *
  * @example
  * ```ts
  * const client = new ZkpAuthClient({ baseUrl: 'https://api.example.com' });
  *
- * // First visit: register
- * const { userId } = await client.register('alice', 'hunter2');
+ * // First visit: register (generates a random key, protected by PIN)
+ * await client.register('alice', '123456');
  *
- * // Immediately log in (same session, key still in memory)
- * const { token } = await client.login('alice', 'hunter2');
- * document.cookie = `auth=${token}; Secure; SameSite=Strict`;
+ * // Immediately log in
+ * const { token } = await client.login('alice', '123456');
  *
- * // On logout:
- * client.clearKey();
+ * // Subsequent visits: just log in with PIN (key is in IndexedDB)
+ * const { token } = await client.login('alice', '123456');
+ *
+ * // Check whether a key is already stored (to decide register vs login UI)
+ * if (await client.hasLocalKey('alice')) { ... }
+ *
+ * // Backup / device transfer
+ * const blob = await client.exportKeyBlob('alice', '123456');
+ * // ... send blob to new device ...
+ * await client.importKeyBlob('alice', blob, '123456');
  * ```
  */
 export class ZkpAuthClient {
   private readonly baseUrl: string;
+  private readonly storage: KeyStorage;
 
   /**
-   * In-memory private key. `null` until `register()` succeeds or `loadKey()`
-   * is called. Zeroed by `clearKey()`.
+   * In-memory private key — populated only by the legacy `loadKey()` API.
+   * Normal `register` / `login` flows do NOT use this field; the key lives
+   * only in the local stack of `login()` for the duration of proof assembly.
    */
   private _privateKey: Uint8Array | null = null;
 
@@ -123,36 +147,81 @@ export class ZkpAuthClient {
    * @param options `ZkpAuthClientOptions` — requires `baseUrl`.
    */
   constructor(options: ZkpAuthClientOptions) {
-    // Strip trailing slashes so callers can pass '/', 'https://api.example.com/',
-    // or '' (same-origin). All produce correct fetch URLs via string concatenation:
-    //   '' + '/auth/register' → '/auth/register'  (relative, same-origin proxy)
-    //   'http://localhost:3001' + '/auth/register' → absolute cross-origin URL
     this.baseUrl = options.baseUrl.replace(/\/+$/, '');
+    this.storage = options.storage ?? new IndexedDBKeyStorage();
   }
 
-  // ── State inspection ────────────────────────────────────────────────────────
+  // ── Storage-level helpers ────────────────────────────────────────────────────
 
   /**
-   * `true` when a private key is held in memory and `login()` can be called
-   * without triggering a "no key in memory" error.
+   * Returns `true` when an encrypted key exists in storage for `userId`.
+   *
+   * Use this to decide whether to show a "Register" or "Log in with PIN" UI
+   * without making a network call.
+   *
+   * @param userId The username to check.
+   */
+  async hasLocalKey(userId: string): Promise<boolean> {
+    return this.storage.hasKey(userId);
+  }
+
+  /**
+   * Export an encrypted backup blob for `userId`.
+   *
+   * The blob is a JSON string containing the PIN-encrypted private key.
+   * Pass it to `importKeyBlob` on another device to transfer the identity.
+   *
+   * @param userId Username whose key to export.
+   * @param pin    The PIN that protects the key in storage.
+   *
+   * @throws ZkpStorageError('KEY_NOT_FOUND') — no key stored for `userId`.
+   */
+  async exportKeyBlob(userId: string, pin: string): Promise<string> {
+    validateUsername(userId);
+    validatePin(pin);
+    return this.storage.exportBlob(userId, pin);
+  }
+
+  /**
+   * Import a key backup blob onto this device.
+   *
+   * After import, `login(userId, pin)` works on this device without
+   * re-registering with the server.
+   *
+   * @param userId Username to import the key under.
+   * @param blob   JSON blob produced by `exportKeyBlob`.
+   * @param pin    The PIN used when the blob was exported.
+   *
+   * @throws ZkpCryptoError('DECRYPTION_FAILED') — wrong PIN for the blob.
+   * @throws ZkpStorageError('STORAGE_ERROR')     — blob is malformed.
+   */
+  async importKeyBlob(userId: string, blob: string, pin: string): Promise<void> {
+    validateUsername(userId);
+    validatePin(pin);
+    await this.storage.importBlob(userId, blob, pin);
+  }
+
+  // ── Legacy in-memory key API ─────────────────────────────────────────────────
+  //
+  // These methods are retained for advanced / low-level use cases (e.g. Electron
+  // apps managing keys outside IndexedDB). Normal applications should use
+  // register() / login() / exportKeyBlob() / importKeyBlob() instead.
+
+  /**
+   * `true` when a private key is held in memory via the legacy `loadKey()` API.
+   *
+   * This is `false` after `register()` and `login()` — those flows zero the
+   * key immediately after proof assembly.
    */
   get hasKey(): boolean {
     return this._privateKey !== null;
   }
 
-  // ── Key lifecycle ───────────────────────────────────────────────────────────
-
   /**
-   * Zero-fill and discard the private key held in memory.
+   * Zero-fill and discard any private key held in memory.
    *
-   * Call this on user logout to prevent the key from lingering in the JS heap.
-   * After `clearKey()`, `hasKey` is `false` and `login()` will throw until
-   * a new key is established via `register()` or `loadKey()`.
-   *
-   * Note: JavaScript provides no hard zeroization guarantee (the GC may have
-   * relocated the backing ArrayBuffer), but calling `fill(0)` makes a
-   * best-effort attempt to overwrite the key bytes in place — the same
-   * hygiene policy used by `@zkp-auth/core`'s nonce handling.
+   * This does NOT remove the encrypted key from IndexedDB storage. To revoke
+   * a key entirely, call `storage.deleteKey(userId)` directly.
    */
   clearKey(): void {
     if (this._privateKey !== null) {
@@ -162,14 +231,10 @@ export class ZkpAuthClient {
   }
 
   /**
-   * Load a previously exported private key back into memory.
+   * Load a raw private key into memory.
    *
-   * Use this to restore a key that was persisted out-of-band (e.g. encrypted
-   * IndexedDB). The key must be a 32-byte `Uint8Array` encoding a scalar
-   * in `[1, L)` — the same shape produced by `register()`.
-   *
-   * The SDK stores a copy of the supplied buffer so the caller may zero
-   * their own copy after this call.
+   * Advanced API — prefer `login()` for normal flows. Use this when
+   * importing a key from an out-of-band channel (e.g. a QR transfer).
    *
    * @param privateKey 32-byte Ed25519 scalar private key.
    * @throws ZkpCryptoError('CURVE_ERROR') when `privateKey` is not a
@@ -183,17 +248,14 @@ export class ZkpAuthClient {
       );
     }
     this.clearKey();
-    this._privateKey = Uint8Array.from(privateKey); // defensive copy
+    this._privateKey = Uint8Array.from(privateKey);
   }
 
   /**
    * Export a copy of the private key currently held in memory.
    *
-   * The returned `Uint8Array` is a fresh copy — zeroing it does not affect
-   * the key stored inside the client.
-   *
-   * Use this to persist the key out-of-band (e.g. encrypt and store in
-   * IndexedDB) so `login()` can be called after a page reload.
+   * Only works after `loadKey()`. Normal `register` / `login` flows do not
+   * retain the key in memory.
    *
    * @returns A 32-byte copy of the in-memory private key.
    * @throws ZkpCryptoError('CURVE_ERROR') when no key is in memory.
@@ -202,57 +264,53 @@ export class ZkpAuthClient {
     if (this._privateKey === null) {
       throw new ZkpCryptoError(
         'CURVE_ERROR',
-        'exportKey: no private key in memory — call register() or loadKey() first',
+        'exportKey: no private key in memory — call loadKey() first',
       );
     }
     return Uint8Array.from(this._privateKey);
   }
 
-  // ── Protocol methods ────────────────────────────────────────────────────────
+  // ── Protocol methods ─────────────────────────────────────────────────────────
 
   /**
    * Register a new user with the ZKP auth server.
    *
    * Steps:
-   * 1. Validate `username` and `password`.
-   * 2. Generate a fresh Ed25519 keypair using the browser CSPRNG.
-   * 3. POST `{ userId: username, publicKeyHex }` to `/auth/register`.
-   * 4. On success, store the private key in memory and return the outcome.
+   * 1. Validate `username` and `pin`.
+   * 2. Generate a truly random Ed25519 keypair via the browser CSPRNG.
+   * 3. Encrypt the private key with `pin` (Argon2id + AES-256-GCM) and
+   *    persist the encrypted blob in IndexedDB under `username`.
+   * 4. POST `{ userId: username, publicKeyHex }` to `/auth/register`.
+   * 5. Return `{ userId, publicKeyHex }`.
    *
-   * If the server responds with a non-2xx status (e.g. user already exists),
-   * a `ZkpServerError('REGISTER_FAILED')` is thrown and the generated private
-   * key is discarded — `hasKey` remains unchanged.
+   * The private key never appears in memory after this call returns. It
+   * is zeroed inside the storage backend immediately after encryption.
    *
    * @param username Non-empty string, ≤ 256 UTF-8 bytes.
-   * @param password String, ≤ 4 096 UTF-8 bytes. An empty string is permitted.
-   *
-   * @returns `RegisterOutcome` containing `userId` and `publicKeyHex`.
+   * @param pin      Non-empty string. Local only — never sent to the server.
    *
    * @throws ZkpCryptoError('INVALID_USERNAME') — empty or oversize username.
-   * @throws ZkpCryptoError('INVALID_PASSWORD') — oversize password.
+   * @throws ZkpCryptoError('INVALID_PIN')      — empty PIN.
    * @throws ZkpCryptoError('RNG_FAILURE')      — CSPRNG or rejection-sampling failure.
-   * @throws ZkpCryptoError('CURVE_ERROR')       — @noble/curves internal error.
-   * @throws ZkpNetworkError                     — fetch() rejected.
-   * @throws ZkpServerError('REGISTER_FAILED')   — server returned non-2xx.
+   * @throws ZkpCryptoError('CURVE_ERROR')      — @noble/curves internal error.
+   * @throws ZkpStorageError('STORAGE_ERROR')   — IndexedDB write failed.
+   * @throws ZkpNetworkError                    — fetch() rejected.
+   * @throws ZkpServerError('REGISTER_FAILED')  — server returned non-2xx.
    */
-  async register(username: string, password: string): Promise<RegisterOutcome> {
-    // Step 1 — input validation (throws ZkpCryptoError on failure).
+  async register(username: string, pin: string): Promise<RegisterOutcome> {
+    // Step 1 — validate inputs.
     validateUsername(username);
-    encodePassword(password); // validate only; result discarded at registration time
+    validatePin(pin);
 
-    // Step 2 — derive deterministic keypair from username + password.
-    // Using a KDF means the private key is reproducible from credentials alone,
-    // so it never needs to be stored — login() re-derives it on every call.
-    const { privateKey, publicKey } = await browserDeriveKeyPair(username, password);
+    // Step 2+3 — generate random keypair and store it encrypted.
+    // Returns only the public key; private key is zeroed inside the backend.
+    const publicKey = await this.storage.generateAndStore(username, pin);
     const publicKeyHex = bytesToHex(publicKey);
 
-    // Step 3 — register with the server.
-    // If this throws, privateKey is never stored — caller retains no new state.
+    // Step 4 — register with the server.
+    // If this throws, the key is already in local storage. The user can retry
+    // registration or call storage.deleteKey(username) to clean up.
     await postRegister(this.baseUrl, username, publicKeyHex);
-
-    // Step 4 — server accepted; cache the key in memory for the current session.
-    this.clearKey(); // zero any previously held key before replacing
-    this._privateKey = privateKey;
 
     return { userId: username, publicKeyHex };
   }
@@ -261,86 +319,63 @@ export class ZkpAuthClient {
    * Authenticate an already-registered user and obtain a JWT.
    *
    * Steps:
-   * 1. Validate `username` and `password`.
-   * 2. POST `{ userId: username }` to `/auth/challenge` to obtain a
-   *    server-issued 32-byte challenge.
-   * 3. Compute a 64-byte Schnorr proof using the private key in memory.
-   * 4. POST `{ userId: username, proofHex }` to `/auth/verify`.
-   * 5. Return `{ userId, token }` on success.
+   * 1. Validate `username` and `pin`.
+   * 2. Decrypt the private key from local storage using `pin`.
+   * 3. POST `{ userId: username }` to `/auth/challenge` → 32-byte challenge.
+   * 4. Compute a 64-byte Schnorr proof using the private key.
+   * 5. Zero the private key unconditionally.
+   * 6. POST `{ userId: username, proofHex }` to `/auth/verify`.
+   * 7. Return `{ userId, token }`.
    *
-   * Requires that `hasKey` is `true` (i.e. `register()` or `loadKey()` was
-   * called successfully in the current session).
+   * The private key is in memory only between steps 2 and 5.
    *
    * @param username Non-empty string, ≤ 256 UTF-8 bytes.
-   * @param password String, ≤ 4 096 UTF-8 bytes. Must match the password
-   *   used at registration time (currently a no-op in the protocol; reserved
-   *   for future password-derived-key integration).
+   * @param pin      The PIN used when `register()` was called on this device.
    *
-   * @returns `LoginOutcome` containing `userId` and a signed JWT `token`.
-   *
-   * @throws ZkpCryptoError('INVALID_USERNAME') — empty or oversize username.
-   * @throws ZkpCryptoError('INVALID_PASSWORD') — oversize password.
-   * @throws ZkpCryptoError('CURVE_ERROR')       — no key in memory, or
-   *   @noble/curves internal error during proof computation.
-   * @throws ZkpCryptoError('RNG_FAILURE')       — CSPRNG failure during nonce
-   *   generation inside proof computation.
+   * @throws ZkpCryptoError('INVALID_USERNAME')  — empty or oversize username.
+   * @throws ZkpCryptoError('INVALID_PIN')       — empty PIN.
+   * @throws ZkpStorageError('KEY_NOT_FOUND')    — no key in storage; register first.
+   * @throws ZkpCryptoError('DECRYPTION_FAILED') — wrong PIN.
+   * @throws ZkpStorageError('STORAGE_ERROR')    — IndexedDB read failed.
+   * @throws ZkpCryptoError('CURVE_ERROR')       — @noble/curves internal error.
+   * @throws ZkpCryptoError('RNG_FAILURE')       — CSPRNG failure during nonce generation.
    * @throws ZkpNetworkError                     — fetch() rejected.
    * @throws ZkpServerError('CHALLENGE_FAILED')  — server did not issue a challenge.
-   * @throws ZkpServerError('PROOF_REJECTED')    — server's cryptographic
-   *   verification returned false (challenge expired, replayed, or proof invalid).
+   * @throws ZkpServerError('PROOF_REJECTED')    — proof verification failed.
    * @throws ZkpServerError('SERVER_ERROR')      — unexpected server fault.
    */
-  async login(username: string, password: string): Promise<LoginOutcome> {
-    // Step 1 — input validation.
+  async login(username: string, pin: string): Promise<LoginOutcome> {
+    // Step 1 — validate inputs.
     validateUsername(username);
-    const passwordBytes = encodePassword(password);
+    validatePin(pin);
 
-    // Step 2 — obtain the private key.
-    //
-    // The key is derived deterministically from username + password via PBKDF2,
-    // so it is always available — no prior register() call in the current
-    // session is required. This fixes the "private key lost on page reload"
-    // issue: after a reload the user types their credentials and login() re-
-    // derives the exact same scalar that was registered with the server.
-    //
-    // If register() was already called this session, we use the cached key
-    // (same value, avoids running PBKDF2 twice in the same session).
-    let privateKey: Uint8Array;
-    if (this._privateKey !== null) {
-      // Fast path: key already in memory from this session's register() call.
-      privateKey = this._privateKey;
-    } else {
-      // Slow path: re-derive from credentials (page reload or fresh tab).
-      const derived = await browserDeriveKeyPair(username, password);
-      privateKey = derived.privateKey;
-      // Cache for any further login() calls this session.
-      this._privateKey = privateKey;
+    // Step 2 — decrypt private key from storage.
+    // Throws KEY_NOT_FOUND or DECRYPTION_FAILED on failure.
+    const privateKey = await this.storage.unlock(username, pin);
+
+    try {
+      // Step 3 — fetch challenge.
+      const challengeResult = await postChallenge(this.baseUrl, username);
+      const challengeBytes = hexToBytes(challengeResult.challengeHex);
+
+      if (challengeBytes.byteLength !== 32) {
+        throw new ZkpCryptoError(
+          'CURVE_ERROR',
+          `Server returned a challenge of unexpected length: expected 32 bytes, got ${challengeBytes.byteLength.toString()}`,
+        );
+      }
+
+      // Step 4 — compute Schnorr proof.
+      const proof = browserComputeProof(privateKey, challengeBytes);
+      const proofHex = bytesToHex(proof);
+
+      // Step 6 — submit proof.
+      const verifyResult = await postVerify(this.baseUrl, username, proofHex);
+
+      return { userId: username, token: verifyResult.token ?? '' };
+    } finally {
+      // Step 5 — zero the private key unconditionally, even on error.
+      privateKey.fill(0);
     }
-
-    // Step 3 — fetch challenge from server.
-    const challengeResult = await postChallenge(this.baseUrl, username);
-    const challengeBytes = hexToBytes(challengeResult.challengeHex);
-
-    if (challengeBytes.byteLength !== 32) {
-      // The server returned a challengeHex that isn't 64 hex chars (32 bytes).
-      throw new ZkpCryptoError(
-        'CURVE_ERROR',
-        `Server returned a challenge of unexpected length: expected 32 bytes, got ${challengeBytes.byteLength.toString()}`,
-      );
-    }
-
-    // Step 4 — compute proof (pure synchronous crypto; throws ZkpCryptoError).
-    const proof = browserComputeProof(privateKey, passwordBytes, challengeBytes);
-    const proofHex = bytesToHex(proof);
-
-    // Step 5 — submit proof to server.
-    const verifyResult = await postVerify(this.baseUrl, username, proofHex);
-
-    // Step 6 — return outcome.
-    // token is undefined when the server uses cookie-based auth (the JWT is
-    // delivered via Set-Cookie instead of the response body). Return an empty
-    // string in that case; callers should not depend on the token field when
-    // using HttpOnly cookie sessions.
-    return { userId: username, token: verifyResult.token ?? '' };
   }
 }

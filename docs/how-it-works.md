@@ -54,26 +54,49 @@ In the interactive protocol, the server sends `c` after receiving `R`. This libr
 This exact construction is pinned in a single function (`computeFiatShamirScalar`) shared by both the prover and verifier, so they can never drift.
 :::
 
-## Why the password never leaves the browser
+---
 
-The password is used **only** to derive a deterministic keypair in the browser, via PBKDF2:
+## Why no password is involved in the cryptographic proof
+
+ZKP Auth v0.2+ is fully **passwordless** at the protocol level. There is no password-derived key and no password-oracle vulnerability.
+
+### Key generation (registration)
 
 ```
-privateKey = PBKDF2-SHA512(password, salt=username, iterations=100_000) → scalar in [1, L)
+privateKey = random Ed25519 scalar, uniform in [1, L)
 publicKey  = privateKey · G   (Ed25519 base point multiply)
 ```
 
-After derivation:
+`privateKey` is generated once per device using **bounded rejection sampling** over `globalThis.crypto.getRandomValues`. The key has 252 bits of entropy — far more than any password.
 
-1. `publicKey` (32 bytes) is sent to the server **once** at registration.
-2. `privateKey` is kept in the browser's JavaScript heap for the session.
-3. The **password itself** is never sent anywhere — not even as a hash.
+### Local key encryption (device storage)
 
-On subsequent logins the browser re-derives the same `privateKey` from the same credentials. The server verifies the proof against the stored `publicKey`. No password comparison ever happens on the server.
+The private key is **never stored in plaintext**. Before being written to IndexedDB, it is wrapped:
 
-::: warning What this is NOT
-The server does not verify passwords. It verifies **proofs**. If you lose access to your username and password, there is no password reset flow built into this library — you would need to implement one at the application level (e.g. email-based re-registration).
-:::
+```
+salt         = CSPRNG(16 bytes)               — fresh per registration
+wrappingKey  = Argon2id(PIN, salt,            — 64 MB memory, 3 passes, 1 lane
+                 m=65536, t=3, p=1)
+iv           = CSPRNG(12 bytes)               — fresh per registration
+ciphertext   = AES-256-GCM(wrappingKey, privateKey, iv)
+
+stored: { version, pubKeyHex, salt, iv, ciphertext }
+```
+
+**The PIN is the only secret the user ever types.** It never leaves the browser. A server DB breach reveals only public keys.
+
+### Login
+
+On login, the browser:
+1. Retrieves the encrypted blob from IndexedDB
+2. Re-derives `wrappingKey` from PIN + stored salt (Argon2id)
+3. Decrypts the private key (AES-256-GCM — wrong PIN → tag mismatch → error)
+4. Computes the Schnorr proof
+5. **Zeroes the private key unconditionally in a `finally` block**
+
+The PIN is discarded immediately after decryption.
+
+---
 
 ## Full authentication flow
 
@@ -82,16 +105,17 @@ The server does not verify passwords. It verifies **proofs**. If you lose access
 ```
 Browser                                          Server
   │                                                │
-  │  1. username + password entered                │
+  │  1. privateKey = CSPRNG scalar                 │
+  │     publicKey  = privateKey · G                │
   │                                                │
-  │  2. PBKDF2(password, salt=username)            │
-  │     → privateKey (stays in memory)             │
-  │     → publicKey  = privateKey · G              │
+  │  2. wrappingKey = Argon2id(PIN, salt)           │
+  │     ciphertext  = AES-256-GCM(wk, privateKey)  │
+  │     Store encrypted blob → IndexedDB           │
   │                                                │
   │──── POST /auth/register ──────────────────────▶│
   │     { userId, publicKeyHex }                   │
   │                                                │  3. store(userId → publicKey)
-  │◀─── 200 OK ────────────────────────────────────│
+  │◀─── 201 Created ───────────────────────────────│
   │                                                │
 ```
 
@@ -100,10 +124,11 @@ Browser                                          Server
 ```
 Browser                                          Server
   │                                                │
-  │  1. username + password entered                │
+  │  1. PIN entered                                │
   │                                                │
-  │  2. PBKDF2(password, salt=username)            │
-  │     → privateKey (re-derived or from memory)   │
+  │  2. Load blob from IndexedDB                   │
+  │     wrappingKey = Argon2id(PIN, stored_salt)   │
+  │     privateKey  = AES-256-GCM.decrypt(blob)    │
   │                                                │
   │──── POST /auth/challenge ─────────────────────▶│
   │     { userId }                                 │
@@ -116,6 +141,7 @@ Browser                                          Server
   │     c = SHA-512(R ∥ X ∥ challenge) mod L       │
   │     s = (r + c · privateKey) mod L             │
   │     proof = R_bytes ∥ s_bytes  (64 bytes)      │
+  │     privateKey.fill(0)  ← zeroed here          │
   │                                                │
   │──── POST /auth/verify ────────────────────────▶│
   │     { userId, proofHex }                       │
@@ -134,15 +160,21 @@ Step 5 is critical: `consume(userId)` **atomically deletes** the challenge from 
 
 The challenge also has a configurable TTL (default 60 seconds). An expired challenge returns `null` from the store before the proof is even checked.
 
+---
+
 ## Security properties
 
 | Property | How it's enforced |
 |---|---|
-| Password never transmitted | PBKDF2 derivation is client-side only |
+| No password involved | Keypair is randomly generated — no KDF from user secret |
+| Private key never leaves device | Encrypted in IndexedDB; decrypted in memory only during proof computation |
+| Private key zeroed after use | `finally` block calls `privateKey.fill(0)` unconditionally |
 | Proofs are non-replayable | Server challenge is consumed on first use |
 | Proofs are session-bound | Fiat-Shamir hashes the challenge into `c` |
+| PIN brute-force is expensive | Argon2id: 64 MB memory wall per attempt |
 | No timing oracle on verify | Final point comparison uses `crypto.timingSafeEqual` |
 | Malformed proofs → `false`, not exception | Protects against oracle distinguishing malformed vs. wrong |
 | Private key derivation is uniform | Rejection sampling — never `mod L` reduction |
+| Public key oracle impossible | Public key is random — no relationship to any password |
 
 For a deeper dive, see the [Security Model](/security) page.

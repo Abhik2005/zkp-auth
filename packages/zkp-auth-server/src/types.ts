@@ -8,6 +8,11 @@
  */
 
 import type { Request } from 'express';
+import type { AuditLogger } from './audit-log.js';
+import type {
+  InMemoryRateLimiter,
+  InMemoryRegistrationRateLimiter,
+} from './rate-limit.js';
 
 // ---------------------------------------------------------------------------
 // Rate-limit hook
@@ -49,15 +54,33 @@ export type RateLimitHook = (req: Request) => Promise<void>;
 export type GetPublicKeyFn = (userId: string) => Promise<Uint8Array | null>;
 
 /**
- * Async hook called after successful proof verification to persist a new
- * public key registration.
+ * Async hook called to persist a user's Ed25519 public key.
  *
- * Callers are responsible for deduplication / upsert semantics.
+ * When used with `zkpRegister`, this must be create-only: use a unique
+ * constraint / conditional insert and throw `RegistrationFailedError` on
+ * duplicate `userId` conflicts. Do not use upsert/update for registration.
+ *
+ * Rekey flows may reuse this type with update semantics after proof
+ * verification succeeds.
  *
  * @param userId    The user identifier from the request body.
  * @param publicKey The 32-byte Ed25519 public key.
  */
 export type SavePublicKeyFn = (userId: string, publicKey: Uint8Array) => Promise<void>;
+
+/**
+ * Async hook used during registration to determine whether a user identifier
+ * already has an authentication public key. This hook is required so
+ * `zkpRegister` can reject duplicate registration before calling
+ * `savePublicKey`; callers must still enforce a database uniqueness constraint
+ * to close write races.
+ *
+ * @param userId The user identifier extracted from the request body.
+ * @returns      Existing public key, or `null` if no key exists.
+ */
+export type GetRegistrationPublicKeyFn = (
+  userId: string,
+) => Promise<Uint8Array | null>;
 
 // ---------------------------------------------------------------------------
 // Challenge store interface (injectable)
@@ -106,16 +129,42 @@ export interface IChallengeStore {
  * @example
  * ```ts
  * app.post('/auth/register', zkpRegister({
- *   savePublicKey: db.users.savePublicKey,
+ *   getPublicKey: db.users.getPublicKey,
+ *   savePublicKey: db.users.createPublicKey,
  * }));
  * ```
  */
 export interface ZkpRegisterOptions {
   /**
+   * Look up an existing public key before registration.
+   *
+   * Required for secure duplicate prevention. The register middleware returns a
+   * generic 409 "registration failed" when this hook finds an existing key.
+   */
+  getPublicKey: GetRegistrationPublicKeyFn;
+  /**
    * Persist the user's public key.
-   * Called only after input validation succeeds.
+   * Called only after input validation and duplicate lookup succeed. Must be
+   * create-only for registration and fail on duplicate `userId` so concurrent
+   * register requests cannot overwrite an existing key.
    */
   savePublicKey: SavePublicKeyFn;
+  /**
+   * Minimum response duration for register attempts. Default: 150 ms.
+   * Intended for tests/custom deployments; keep a non-zero production value to
+   * reduce username-enumeration timing signals.
+   */
+  minRegisterResponseMs?: number;
+  /**
+   * Optional audit logger. Defaults to the package JSONL stderr logger.
+   * Usernames are hashed by the audit module before records are written.
+   */
+  auditLogger?: AuditLogger;
+  /**
+   * Optional registration limiter instance. Defaults to the shared in-memory
+   * limiter with 5 attempts/hour and 3 registrations/day per IP.
+   */
+  registrationRateLimiter?: InMemoryRegistrationRateLimiter;
   /** Optional rate-limiter hook. Called before any processing. */
   rateLimitHook?: RateLimitHook;
 }
@@ -139,6 +188,11 @@ export interface ZkpChallengeOptions {
   ttlMs?: number;
   /** Optional rate-limiter hook. Called before any processing. */
   rateLimitHook?: RateLimitHook;
+  /**
+   * Optional built-in limiter. Defaults to a shared in-memory auth limiter.
+   * Use `false` only when an external limiter is enforced before this route.
+   */
+  authRateLimiter?: InMemoryRateLimiter | false;
 }
 
 // ---------------------------------------------------------------------------
@@ -173,6 +227,11 @@ export interface ZkpVerifyOptions {
   jwtExpiresInSeconds?: number;
   /** Optional rate-limiter hook. Called before any processing. */
   rateLimitHook?: RateLimitHook;
+  /**
+   * Optional built-in limiter. Defaults to a shared in-memory auth limiter.
+   * Use `false` only when an external limiter is enforced before this route.
+   */
+  authRateLimiter?: InMemoryRateLimiter | false;
 }
 
 // ---------------------------------------------------------------------------

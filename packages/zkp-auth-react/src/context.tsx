@@ -9,7 +9,8 @@
 //   • `register` and `login` set loading=true, await the client, then dispatch
 //     a single action with the result (success or error). This guarantees the
 //     state snapshot seen by consumers is always internally consistent.
-//   • `logout` is synchronous: clears the key, dispatches RESET.
+//   • `logout` is synchronous: dispatches RESET. The encrypted key remains in
+//     IndexedDB — the user can log back in with their PIN.
 
 import {
   createContext,
@@ -152,7 +153,7 @@ export function ZKPProvider({ options, children }: ZKPProviderProps): JSX.Elemen
   const [state, dispatch] = useReducer(authReducer, initialState);
 
   // One client instance per provider lifetime. useRef ensures it survives
-  // re-renders without being recreated (which would zero the private key).
+  // re-renders without being recreated (which would lose the storage ref).
   const clientRef = useRef<ZkpAuthClient | null>(null);
   if (clientRef.current === null) {
     clientRef.current = new ZkpAuthClient(options);
@@ -160,13 +161,13 @@ export function ZKPProvider({ options, children }: ZKPProviderProps): JSX.Elemen
 
   // ── Operations ─────────────────────────────────────────────────────────────
 
-  const register = useCallback(async (username: string, password: string): Promise<void> => {
+  const register = useCallback(async (username: string, pin: string): Promise<void> => {
     const client = clientRef.current;
     if (client === null) return; // should never happen; guard for type-safety
 
     dispatch({ type: 'LOADING_START' });
     try {
-      const outcome = await client.register(username, password);
+      const outcome = await client.register(username, pin);
       const user: ZKPUser = {
         userId: outcome.userId,
         publicKeyHex: outcome.publicKeyHex,
@@ -174,25 +175,20 @@ export function ZKPProvider({ options, children }: ZKPProviderProps): JSX.Elemen
       };
       dispatch({ type: 'REGISTER_SUCCESS', user });
     } catch (err) {
-      // ZkpClientError is always thrown by the client. The cast is safe because
-      // ZkpAuthClient never throws plain Error or unknown types — it always
-      // wraps in one of the three typed subclasses.
       dispatch({ type: 'AUTH_ERROR', error: err as ZkpClientError });
     }
   }, []); // clientRef is stable; no deps needed
 
-  const login = useCallback(async (username: string, password: string): Promise<void> => {
+  const login = useCallback(async (username: string, pin: string): Promise<void> => {
     const client = clientRef.current;
     if (client === null) return;
 
     dispatch({ type: 'LOADING_START' });
     try {
-      const outcome = await client.login(username, password);
+      const outcome = await client.login(username, pin);
       const user: ZKPUser = {
         userId: outcome.userId,
         token: outcome.token,
-        // Preserve publicKeyHex from a preceding register() in the same session,
-        // but do not overwrite with null if we logged in without re-registering.
         publicKeyHex: null,
       };
       dispatch({ type: 'LOGIN_SUCCESS', user });
@@ -201,7 +197,15 @@ export function ZKPProvider({ options, children }: ZKPProviderProps): JSX.Elemen
     }
   }, []);
 
+  const hasLocalKey = useCallback(async (userId: string): Promise<boolean> => {
+    const client = clientRef.current;
+    if (client === null) return false;
+    return client.hasLocalKey(userId);
+  }, []);
+
   const logout = useCallback((): void => {
+    // clearKey() zeroes any in-memory key from the legacy loadKey() API.
+    // The encrypted IndexedDB entry is preserved — user can log in again.
     clientRef.current?.clearKey();
     dispatch({ type: 'RESET' });
   }, []);
@@ -211,8 +215,8 @@ export function ZKPProvider({ options, children }: ZKPProviderProps): JSX.Elemen
   // useMemo keeps the context value reference stable when state has not changed,
   // avoiding unnecessary re-renders of every consumer on unrelated renders.
   const value = useMemo<ZKPContextValue>(
-    () => ({ ...state, register, login, logout }),
-    [state, register, login, logout],
+    () => ({ ...state, register, login, hasLocalKey, logout }),
+    [state, register, login, hasLocalKey, logout],
   );
 
   return <ZKPContext.Provider value={value}>{children}</ZKPContext.Provider>;

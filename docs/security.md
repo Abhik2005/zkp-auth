@@ -4,12 +4,31 @@ An honest account of what ZKP Auth protects against, what it doesn't, and the cu
 
 ## What is protected
 
-### Password confidentiality
+### No password — no password oracle
 
-The plaintext password **never leaves the browser**. It is fed into PBKDF2 to derive an Ed25519 keypair, and then discarded. The server stores only the 32-byte public key. Even if the server's database is fully compromised, an attacker gains:
+ZKP Auth v0.2+ is fully **passwordless** at the cryptographic protocol level. There is no PBKDF2, no password-derived key, and no way to mount an offline dictionary attack against data leaked from the server.
 
-- A list of public keys — which are mathematically useless without the corresponding private keys.
-- No password hashes — so offline dictionary attacks are impossible by design.
+- **Server DB breach** reveals only 32-byte Ed25519 public keys — mathematically useless without the corresponding private scalars.
+- **Public key oracle** attacks are impossible: the public key is a random curve point unrelated to any user secret.
+
+### Private key confidentiality
+
+The Ed25519 private key is **never stored in plaintext** and **never transmitted**.
+
+On registration:
+1. A random 252-bit scalar is generated via `crypto.getRandomValues` with bounded rejection sampling.
+2. The scalar is encrypted with **AES-256-GCM** using a wrapping key derived from the user's PIN via **Argon2id** (`m=65536 KiB, t=3, p=1`).
+3. The encrypted blob (with a fresh random 16-byte salt and 12-byte IV) is stored in IndexedDB.
+4. Only the 32-byte **public key** is sent to the server.
+
+On login, the private key is held in memory only between decryption and proof assembly, then **unconditionally zeroed in a `finally` block**.
+
+### PIN brute-force resistance
+
+An attacker who steals the IndexedDB blob must break Argon2id to recover the private key. With `m=65536 KiB` (64 MB), each guess requires 64 MB of memory and approximately 3 passes of computation. This makes GPU-parallel attacks expensive:
+
+- A GPU with 80 GB VRAM can run ≈ 1280 parallel Argon2id instances.
+- At typical Argon2id throughput this translates to a few thousand guesses per second — compared to billions/second for bcrypt/PBKDF2 on the same GPU.
 
 ### Proof non-replayability
 
@@ -50,36 +69,38 @@ The nonce buffer is zero-filled after use (best-effort — see [Known Limitation
 
 ### In-memory private key exposure
 
-The private key is held in the JavaScript heap. It is visible to:
+The private key is held in the JavaScript heap during proof computation. It is visible to:
 
-- **Any JavaScript running in the same origin** — XSS that gains code execution can read it.
-- **Browser devtools** if the user or an attacker opens them.
+- **Any JavaScript running in the same origin** — XSS that gains code execution can read it during this window.
+- **Browser devtools** if the user or an attacker opens them during authentication.
 - **Memory inspection** tools on the user's device.
 
-This is an inherent limitation of JavaScript cryptography. The key can be derived again from credentials, so it doesn't need to be persisted — but it exists in memory for the duration of the session.
+The window of exposure is limited: the key is loaded, a proof is computed (microseconds), and then zeroed. It is not held for the duration of the session. However, this brief in-memory exposure is an inherent limitation of JavaScript cryptography.
+
+### Device loss
+
+If the device is physically lost, the encrypted IndexedDB blob is accessible to anyone who gains OS-level access to the browser profile. The Argon2id wrapping provides resistance proportional to PIN strength. A short numeric PIN (e.g. 4 digits) provides weak protection against a determined attacker with the device.
+
+**Mitigation:** encourage users to set a meaningful PIN; implement optional biometric unlock at the application layer once WebAuthn support is added.
 
 ### Server-side key management
 
 The server stores public keys. This library provides no built-in mechanism for:
 
-- **Key rotation** — changing a user's keypair requires re-registration.
-- **Key revocation** — there is no built-in blocklist; deleting the public key from your database is the only revocation mechanism.
-- **Multi-device** — each device that derives the keypair from the same credentials produces the same public key, so multi-device works transparently, but sharing credentials defeats per-device revocation.
+- **Key rotation** — a new device generates a new random keypair; re-registration is required.
+- **Key revocation** — deleting the public key from your database is the only revocation mechanism.
+- **Multi-device** — each device generates an independent random keypair. Use `exportKeyBlob` / `importKeyBlob` to transfer a key to a new device, or re-register with a new keypair on the new device.
 
 ### Transport security
 
 ZKP Auth does not encrypt or authenticate the network channel. Deploy behind HTTPS. Without TLS:
 
-- An attacker can capture and replay challenges (the TTL still protects against stale replays, but a MITM can relay a live challenge).
+- An attacker can capture and relay challenges (the TTL still protects against stale replays, but a MITM can relay a live challenge).
 - The public key sent at registration is visible in plaintext.
 
 ### Multi-factor authentication
 
-ZKP Auth is single-factor: knowledge of the username and password. It provides no second factor and does not integrate with TOTP, WebAuthn, or hardware keys.
-
-### Password strength enforcement
-
-The library accepts any password (including empty string) at the protocol level. Password strength policy (minimum length, complexity, breach-password checks) must be enforced at the application layer before calling `register()`.
+ZKP Auth is single-factor: possession of the device and knowledge of the PIN. It provides no second factor and does not integrate with TOTP or out-of-band codes. WebAuthn integration (hardware-backed keys) is planned as a `KeyStorage` backend in a future release.
 
 ### Brute-force protection
 
@@ -91,11 +112,11 @@ The library provides `rateLimitHook` on all three middleware factories but does 
 
 ### JavaScript zeroization
 
-`r_bytes.fill(0)` is called on the nonce buffer after proof assembly. However, JavaScript provides no hard zeroization guarantee:
+`privateKey.fill(0)` is called unconditionally in the `finally` block after proof assembly. However, JavaScript provides no hard zeroization guarantee:
 
 - The JIT compiler may have spilled scalar values to registers that `fill(0)` cannot reach.
 - The garbage collector may have moved the backing `ArrayBuffer` before the fill.
-- The bigint `r` and `x` cannot be zeroed from user code.
+- The bigint scalars used internally by `@noble/curves` cannot be zeroed from user code.
 
 This is documented as best-effort hygiene. The same limitation applies to all browser-side JavaScript cryptography.
 
@@ -137,14 +158,18 @@ const store: IChallengeStore = {
 
 ### No account recovery flow
 
-If a user forgets their password, they lose access. The protocol cannot be used to recover credentials — a password-derived key is only as recoverable as the password itself. Implement an out-of-band recovery mechanism (email-based re-registration, recovery codes) at the application layer.
+If a user forgets their PIN and cannot use `importKeyBlob` from a backup, they lose access. Implement an out-of-band recovery mechanism (e.g. email-based re-registration) at the application layer. The `exportKeyBlob` / `importKeyBlob` API provides a self-service recovery path for users who anticipate device transfer.
+
+### IndexedDB availability
+
+`IndexedDBKeyStorage` requires a browser environment with IndexedDB support. In non-browser environments (Node.js, Electron without `indexedDB` shim), pass `storage: new MemoryKeyStorage()` to `ZkpAuthClient`.
 
 ---
 
 ## Audit status {#audit-status}
 
 ::: danger No independent audit
-This library has **not been reviewed by an independent security auditor**. The cryptographic implementation follows published standards (Schnorr/Ed25519, Fiat-Shamir, PBKDF2) and has an extensive adversarial test suite, but that is not a substitute for a formal audit.
+This library has **not been reviewed by an independent security auditor**. The cryptographic implementation follows published standards (Schnorr/Ed25519, Fiat-Shamir, Argon2id, AES-256-GCM) and has an extensive adversarial test suite, but that is not a substitute for a formal audit.
 
 **Do not deploy to production without your own security review.**
 :::
@@ -152,24 +177,27 @@ This library has **not been reviewed by an independent security auditor**. The c
 ### What has been done
 
 - Schnorr protocol correctness is verified by property-based tests covering:
-  - Round-trip: `computeProof` → `verifyProof` always returns `true` for matching keys.
+  - Round-trip: `browserComputeProof` → `verifyProof` always returns `true` for matching keys.
   - Cross-key rejection: proofs never verify under the wrong public key.
   - Replay rejection: the same proof does not verify with a different challenge.
   - Nonce reuse attack: demonstrated algebraically in an adversarial test.
   - Malformed proof handling: `verifyProof` returns `false` (never throws) for tampered material.
-  - Password no-op: changing `password` with a fixed nonce produces identical proofs.
   - Nonce zero-fill: the nonce buffer is zeroed after use.
+- Key storage is verified by a shared contract test suite running against both `MemoryKeyStorage` and `IndexedDBKeyStorage` (via `fake-indexeddb`), covering:
+  - Correct round-trip: `generateAndStore` → `unlock` produces a scalar `x` where `x·G == publicKey`.
+  - Wrong PIN: AES-GCM tag mismatch throws `DECRYPTION_FAILED`.
+  - Blob transfer: `exportBlob` / `importBlob` produces the same private key on the target.
+  - Salt uniqueness: two `generateAndStore` calls always produce different salts.
 - Timing-safe equality is enforced by an automated audit script that greps for forbidden equality operators (`===`, `!==`, `Buffer.equals`) on byte arrays derived from cryptographic material.
-- The `__forTesting__` fixed-nonce escape hatch is grep-asserted to appear exactly once in `src/` and is absent from all public exports.
 
 ### What has NOT been done
 
-- Independent review of the Fiat-Shamir transcript construction.
+- Independent review of the Argon2id parameterisation (`m`, `t`, `p` values).
 - Side-channel analysis beyond timing-safe equality at the final comparison point.
 - Formal verification of the security reduction.
 - Penetration testing of the Express middleware layer.
-- Review of the PBKDF2 parameterisation (iterations, salt construction).
+- WebAuthn `KeyStorage` backend (planned).
 
 ### Reporting vulnerabilities
 
-Please report security issues by email to `security@your-org.example` rather than opening a public GitHub issue. We aim to acknowledge reports within 48 hours.
+Please report security issues by email to `security@zkp-auth.dev` rather than opening a public GitHub issue. We aim to acknowledge reports within 48 hours.

@@ -5,7 +5,6 @@
 // with the Fiat-Shamir transform — but:
 //
 //   - CSPRNG: `globalThis.crypto.getRandomValues` (WebCrypto)
-//   - KDF: PBKDF2-SHA512 via `globalThis.crypto.subtle` (WebCrypto)
 //   - Ed25519: `@noble/curves/ed25519.js` (browser-compatible)
 //   - SHA-512: `@noble/hashes/sha512.js` (synchronous, browser-compatible)
 //
@@ -20,10 +19,6 @@
 //    the bigint r cannot be wiped from the JS runtime).
 //
 // 3. No `===` / `!==` comparisons on byte arrays derived from secret material.
-//
-// 4. `passwordBytes` is validated for shape but is NOT mixed into the
-//    Fiat-Shamir transcript or the scalar derivation (mirrors core
-//    Requirement 11.1, Property 10).
 
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { bytesToNumberLE, numberToBytesLE, concatBytes } from '@noble/curves/utils.js';
@@ -42,12 +37,6 @@ const MAX_REJECTION_ITERATIONS = 256;
 
 /** Maximum UTF-8 byte length of a username. */
 export const MAX_USERNAME_BYTES = 256;
-
-/**
- * Maximum UTF-8 byte length of a password. Matches the `INVALID_PASSWORD`
- * bound in @zkp-auth/core's `computeProof`.
- */
-export const MAX_PASSWORD_BYTES = 4_096;
 
 // Ed25519 group order L and base point G — read from @noble/curves at module load.
 const L: bigint = ed25519.Point.Fn.ORDER;
@@ -126,21 +115,17 @@ export function validateUsername(username: string): void {
 }
 
 /**
- * Encode a password string as UTF-8 bytes and validate the byte length is
- * within `[0, MAX_PASSWORD_BYTES]` (4 096 bytes). An empty password is
- * permitted — it passes through as a zero-length `Uint8Array`.
+ * Validate that `pin` is a non-empty string.
  *
- * @throws ZkpCryptoError('INVALID_PASSWORD') when the encoding exceeds the limit.
+ * The PIN is used only as local key-wrapping material — it never leaves the
+ * device and is not transmitted to the server.
+ *
+ * @throws ZkpCryptoError('INVALID_PIN') when `pin` is empty or not a string.
  */
-export function encodePassword(password: string): Uint8Array {
-  const bytes = new TextEncoder().encode(password);
-  if (bytes.byteLength > MAX_PASSWORD_BYTES) {
-    throw new ZkpCryptoError(
-      'INVALID_PASSWORD',
-      `password exceeds ${MAX_PASSWORD_BYTES.toString()} UTF-8 bytes`,
-    );
+export function validatePin(pin: string): void {
+  if (typeof pin !== 'string' || pin.length === 0) {
+    throw new ZkpCryptoError('INVALID_PIN', 'PIN must be a non-empty string');
   }
-  return bytes;
 }
 
 // ── Core crypto operations ───────────────────────────────────────────────────
@@ -190,124 +175,6 @@ export function browserGenerateKeyPair(): BrowserKeyPair {
   );
 }
 
-// ── Fixed domain separator for PBKDF2 password-derived keys ─────────────────
-
-/**
- * Domain separator prepended to the password before PBKDF2 derivation.
- * Prevents the same (username, password) pair from producing the same key
- * in an unrelated system that also uses PBKDF2 with a username-based salt.
- */
-const PBKDF2_DOMAIN = 'zkp-auth-v1:';
-
-/**
- * PBKDF2-SHA512 iteration count.
- *
- * In production builds this is 600_000 (OWASP 2023 recommendation).
- * Test builds inject `__TEST_PBKDF2_ITERATIONS__ = 1_000` via the
- * vitest `define` config to keep the suite fast without changing the
- * production default.
- */
-const PBKDF2_ITERATIONS: number =
-  typeof __TEST_PBKDF2_ITERATIONS__ !== 'undefined'
-    ? __TEST_PBKDF2_ITERATIONS__
-    : 600_000;
-
-/**
- * Derive a deterministic `(privateKey, publicKey)` pair from `username` and
- * `password` using PBKDF2-SHA512 via the WebCrypto API.
- *
- * The same `(username, password)` always produces the same keypair, so the
- * private key does NOT need to be persisted — `login()` re-derives it from
- * the credentials the user types each time.
- *
- * KDF construction:
- *   - Password material: UTF-8(`PBKDF2_DOMAIN` + password)
- *   - Salt: UTF-8(username)
- *   - PRF: HMAC-SHA-512
- *   - Iterations: 600 000 (OWASP 2023)
- *   - Output: 64 bytes — fed into rejection-sampling to produce a scalar in [1, L)
- *
- * Rejection-sampling reduces the 64-byte candidate modulo L using the
- * full 512-bit value (no mod-L bias) and retries if the result is 0 or ≥ L.
- * The probability of a single rejection is ≈ 2^-252; with 256 attempts the
- * failure probability is negligible.
- *
- * @param username Non-empty string, ≤ 256 UTF-8 bytes.
- * @param password String, ≤ 4 096 UTF-8 bytes.
- *
- * @returns A `BrowserKeyPair` whose `privateKey` is deterministic for the
- *   given credentials.
- *
- * @throws ZkpCryptoError('RNG_FAILURE')  When PBKDF2 exhausts 256 candidates
- *   without finding a scalar in [1, L) — cryptographically impossible under
- *   correct inputs.
- * @throws ZkpCryptoError('CURVE_ERROR')  When @noble/curves raises an error
- *   during the public-key scalar multiply.
- */
-export async function browserDeriveKeyPair(
-  username: string,
-  password: string,
-  pbkdf2Iterations: number = PBKDF2_ITERATIONS,
-): Promise<BrowserKeyPair> {
-  const enc = new TextEncoder();
-
-  // Import the password + domain prefix as a raw PBKDF2 key material.
-  const keyMaterial = await globalThis.crypto.subtle.importKey(
-    'raw',
-    enc.encode(PBKDF2_DOMAIN + password),
-    'PBKDF2',
-    false,              // not extractable
-    ['deriveBits'],
-  );
-
-  // Salt is the UTF-8 encoding of the username (domain-bound, not secret).
-  const salt = enc.encode(username);
-
-  // Rejection-sampling loop: derive 64 bytes each iteration until we get a
-  // scalar in [1, L). With an ideal PRF this terminates on the first try.
-  for (let attempt = 0; attempt < MAX_REJECTION_ITERATIONS; attempt += 1) {
-    // Mix attempt counter into PBKDF2 salt so each retry is independent.
-    const saltWithCounter = new Uint8Array(salt.byteLength + 1);
-    saltWithCounter.set(salt);
-    saltWithCounter[salt.byteLength] = attempt; // 0..255
-
-    const derived = await globalThis.crypto.subtle.deriveBits(
-      {
-        name: 'PBKDF2',
-        salt: saltWithCounter,
-        iterations: pbkdf2Iterations,
-        hash: 'SHA-512',
-      },
-      keyMaterial,
-      512, // 64 bytes
-    );
-
-    // Take only the first 32 bytes as the candidate scalar.
-    const candidate = new Uint8Array(derived, 0, 32);
-
-    const n = bytesToNumberLE(candidate);
-    if (n >= 1n && n < L) {
-      try {
-        const publicKey = BASE.multiply(n).toBytes();
-        // Return a copy — `derived` ArrayBuffer must not leak.
-        return { privateKey: Uint8Array.from(candidate), publicKey };
-      } catch (cause: unknown) {
-        throw new ZkpCryptoError(
-          'CURVE_ERROR',
-          '@noble/curves raised an error during derived key-pair computation',
-          { cause },
-        );
-      }
-    }
-    // Candidate rejected (n === 0n or n >= L): retry with next counter value.
-  }
-
-  throw new ZkpCryptoError(
-    'RNG_FAILURE',
-    'browserDeriveKeyPair: rejection sampling exhausted 256 attempts — inputs may be malformed',
-  );
-}
-
 /**
  * Compute a 64-byte Schnorr proof of knowledge of `privateKey` over a
  * verifier-chosen 32-byte `challenge`.
@@ -321,13 +188,8 @@ export async function browserDeriveKeyPair(
  * for the same inputs and the same nonce, so proofs produced here verify
  * correctly against the server's `verifyProof`.
  *
- * `passwordBytes` is accepted as opaque bytes and is NOT mixed into the
- * transcript or scalar derivation (mirrors core Requirement 11.1).
- *
- * @param privateKey    32-byte LE scalar produced by `browserGenerateKeyPair`.
- * @param passwordBytes UTF-8-encoded password, length in [0, 4096].
- *                      Shape must be validated by the caller before passing.
- * @param challenge     32-byte server-issued challenge (hex-decoded upstream).
+ * @param privateKey 32-byte LE scalar produced by `browserGenerateKeyPair`.
+ * @param challenge  32-byte server-issued challenge (hex-decoded upstream).
  *
  * @returns 64-byte `Uint8Array` carrying `R_bytes || s_bytes`.
  *
@@ -337,7 +199,6 @@ export async function browserDeriveKeyPair(
  */
 export function browserComputeProof(
   privateKey: Uint8Array,
-  passwordBytes: Uint8Array,
   challenge: Uint8Array,
 ): Uint8Array {
   // Decode private key scalar. Reject 0 and anything ≥ L (mirrors core step 2).
@@ -360,12 +221,6 @@ export function browserComputeProof(
       { cause },
     );
   }
-
-  // `passwordBytes` is intentionally unused past this point. The `void`
-  // expression silences the unused-variable lint without removing the
-  // parameter (it still participates in the call signature for forward-
-  // compatibility when password derivation is added in a future version).
-  void passwordBytes;
 
   // Bounded rejection sampling for the nonce r (mirrors core step 4).
   // Unlike keypair generation, we use mod-L reduction (not raw range check)
@@ -413,9 +268,7 @@ export function browserComputeProof(
 /** @internal Exported for unit tests only — not part of the public API. */
 export const _internals = {
   MAX_USERNAME_BYTES,
-  MAX_PASSWORD_BYTES,
   MAX_REJECTION_ITERATIONS,
-  PBKDF2_ITERATIONS,
   L,
   computeFiatShamirScalar,
 } as const;

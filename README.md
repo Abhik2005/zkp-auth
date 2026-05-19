@@ -7,7 +7,7 @@
 [![CI](https://github.com/Abhik2005/zkp-auth/actions/workflows/ci.yml/badge.svg)](https://github.com/Abhik2005/zkp-auth/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**Zero-Knowledge Proof authentication for TypeScript.** Prove you know a secret without ever sending it — no passwords leave the client, ever.
+**Truly passwordless Zero-Knowledge Proof authentication for TypeScript.** The server never sees a password — not even a hash. No password is ever derived, stored, or transmitted.
 
 > Built on [Schnorr Proof of Knowledge](https://en.wikipedia.org/wiki/Proof_of_knowledge) over Ed25519 with the Fiat–Shamir transform, powered by [@noble/curves](https://github.com/paulmillr/noble-curves).
 
@@ -17,16 +17,17 @@
 
 | Traditional Password Auth | ZKP Auth |
 |---|---|
-| Password sent to server (hashed or not) | **Password never leaves the client** |
+| Password sent to server (hashed or not) | **No password exists on the wire or server** |
 | Server stores password hashes — breach = leak | Server stores only a public key — breach = nothing useful |
 | Phishing can steal passwords | Phishing cannot extract a ZKP credential |
 | Replay attacks possible with stolen hashes | Proofs are single-use and nonce-bound |
 | MITM can intercept credentials | Credentials are cryptographic commitments, not secrets |
+| Device-to-device login requires knowing password | Device transfer via encrypted key blob |
 
 ZKP Auth implements an interactive Schnorr identification protocol with Fiat–Shamir heuristic:
-1. Client generates an ephemeral commitment `R`
-2. Server issues a challenge `c = H(R ‖ pubKey ‖ message)`
-3. Client computes a response `s = r + c·x` (where `x` is the private scalar)
+1. Client generates a **random** Ed25519 keypair on registration — no password involved
+2. The private key is encrypted with **Argon2id + AES-256-GCM** using a local PIN and stored in IndexedDB
+3. On login, the PIN decrypts the key locally; the private key computes a Schnorr proof and is immediately zeroed
 4. Server verifies `s·G = R + c·P` — no secret ever transmitted
 
 ---
@@ -37,8 +38,8 @@ ZKP Auth implements an interactive Schnorr identification protocol with Fiat–S
 |---|---|
 | [`@zkp-auth/core`](packages/zkp-auth-core) | Core crypto primitives — key generation, proof creation & verification |
 | [`@zkp-auth/server`](packages/zkp-auth-server) | Express middleware — challenge issuance & proof verification endpoints |
-| [`@zkp-auth/client`](packages/zkp-auth-client) | Browser SDK — deterministic key derivation & proof construction |
-| [`@zkp-auth/react`](packages/zkp-auth-react) | React hooks — `useZkpAuth`, `useZkpRegister` |
+| [`@zkp-auth/client`](packages/zkp-auth-client) | Browser SDK — random keypair, Argon2id local storage, proof construction |
+| [`@zkp-auth/react`](packages/zkp-auth-react) | React hooks — `useZKPAuth()`, `useZKPUser()` |
 
 ---
 
@@ -48,69 +49,88 @@ ZKP Auth implements an interactive Schnorr identification protocol with Fiat–S
 
 ```bash
 # Server
-npm install @zkp-auth/server @zkp-auth/core
+npm install @zkp-auth/server
 
 # Browser / Bundler
-npm install @zkp-auth/client @zkp-auth/core
+npm install @zkp-auth/client
 
 # React
-npm install @zkp-auth/react @zkp-auth/client @zkp-auth/core
+npm install @zkp-auth/react @zkp-auth/client
 ```
 
 ### Server (Express)
 
 ```typescript
 import express from 'express';
-import { zkpAuthRouter } from '@zkp-auth/server';
+import {
+  zkpRegister,
+  zkpChallenge,
+  zkpVerify,
+  InMemoryChallengeStore,
+} from '@zkp-auth/server';
 
 const app = express();
 app.use(express.json());
 
-app.use('/auth', zkpAuthRouter({
-  // Store and retrieve user public keys
-  async getUser(username) {
-    return db.users.findOne({ username });
-  },
-  async createUser(username, publicKey) {
-    return db.users.create({ username, publicKey });
-  },
-  jwtSecret: process.env.JWT_SECRET!,
+const store = new InMemoryChallengeStore();
+const users = new Map<string, Uint8Array>();
+
+app.post('/auth/register', zkpRegister({
+  getPublicKey: async (userId) => users.get(userId) ?? null,
+  savePublicKey: async (userId, publicKey) => { users.set(userId, publicKey); },
 }));
+
+app.post('/auth/challenge', zkpChallenge({ store }));
+
+app.post('/auth/verify',
+  zkpVerify({ getPublicKey: async (id) => users.get(id) ?? null, store, jwtSecret: process.env.JWT_SECRET! }),
+  (req, res) => {
+    res.cookie('auth', res.locals.zkpToken, { httpOnly: true, sameSite: 'strict' });
+    res.json({ ok: true });
+  },
+);
 ```
 
 ### Client (Browser)
 
 ```typescript
-import { ZkpClient } from '@zkp-auth/client';
+import { ZkpAuthClient } from '@zkp-auth/client';
 
-const client = new ZkpClient({ baseUrl: 'https://api.example.com/auth' });
+const client = new ZkpAuthClient({ baseUrl: 'https://api.example.com' });
 
-// Register — derives a deterministic key pair from password (never sent)
-await client.register('alice', 'my-strong-password');
+// Register — generates a random keypair, encrypts it with the PIN locally,
+// sends only the public key to the server. PIN is never transmitted.
+await client.register('alice', '123456');
 
-// Login — produces a ZK proof; password never transmitted
-const { token } = await client.login('alice', 'my-strong-password');
+// Login — decrypts local key with PIN, computes Schnorr proof, gets JWT.
+// PIN is never transmitted.
+const { token } = await client.login('alice', '123456');
 ```
 
 ### React
 
 ```tsx
-import { useZkpAuth } from '@zkp-auth/react';
+import { ZKPProvider, useZKPAuth } from '@zkp-auth/react';
+
+// Wrap your app once:
+// <ZKPProvider options={{ baseUrl: 'https://api.example.com' }}>
 
 function LoginForm() {
-  const { login, register, isLoading, error } = useZkpAuth({
-    baseUrl: 'https://api.example.com/auth',
-  });
-
-  const handleLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    await login(username, password);
-    // Token stored; password gone from memory
-  };
+  const { login, register, hasLocalKey, loading, error, isAuthenticated, user } = useZKPAuth();
 
   return (
-    <form onSubmit={handleLogin}>
-      {/* ... */}
+    <form onSubmit={async (e) => {
+      e.preventDefault();
+      const f = new FormData(e.currentTarget);
+      const username = f.get('username') as string;
+      const pin      = f.get('pin') as string;
+      const exists   = await hasLocalKey(username);
+      exists ? await login(username, pin) : await register(username, pin);
+    }}>
+      <input name="username" />
+      <input name="pin" type="password" placeholder="PIN (stays on device)" />
+      <button disabled={loading}>Continue</button>
+      {error && <p role="alert">{error.message}</p>}
     </form>
   );
 }
@@ -122,9 +142,10 @@ function LoginForm() {
 
 Full documentation is available at **[abhik2005.github.io/zkp-auth](https://abhik2005.github.io/zkp-auth/)**:
 
-- [Getting Started](docs/getting-started.md)
+- [Getting Started](docs/index.md)
+- [How It Works](docs/how-it-works.md)
 - [Security Model](docs/security.md)
-- [API Reference](docs/api/)
+- [API Reference](docs/api-reference.md)
 - [Migration Guide](docs/migration.md)
 
 ### Run Docs Locally

@@ -5,15 +5,20 @@
  * Runs on http://localhost:3001 by default.
  *
  * Auth strategy:
- *   After successful ZKP verification, the JWT is stored in an HttpOnly
- *   cookie (never exposed to JavaScript). On every page load the frontend
- *   calls GET /api/me; if the cookie is valid, auth state is restored.
+ *   Passwordless ZKP authentication:
+ *   - Registration: receives a randomly-generated Ed25519 public key only
+ *     (private key lives encrypted in the client's IndexedDB).
+ *   - Login: client decrypts local key with PIN, proves knowledge via
+ *     Schnorr proof, receives an HttpOnly JWT cookie.
+ *   - On every page load the frontend calls GET /api/me; if the cookie is
+ *     valid, auth state is restored without another proof round-trip.
  *
  * Routes:
  *   GET  /api/pubkey      — health-check / server info
  *   POST /auth/register   — register userId + publicKeyHex
  *   POST /auth/challenge  — issue 32-byte challenge for userId
  *   POST /auth/verify     — verify Schnorr proof → set JWT cookie
+ *   POST /auth/rekey      — rotate public key after proving current key
  *   GET  /api/me          — read JWT cookie → return user info
  *   POST /api/logout      — clear JWT cookie
  *
@@ -28,11 +33,13 @@ import {
   zkpRegister,
   zkpChallenge,
   zkpVerify,
+  zkpRekey,
   InMemoryChallengeStore,
   verifyJwt,
   InvalidJwtError,
   toErrorBody,
   ServerError,
+  RegistrationFailedError,
 } from '@zkp-auth/server';
 
 // ---------------------------------------------------------------------------
@@ -68,8 +75,16 @@ async function getPublicKey(userId: string): Promise<Uint8Array | null> {
   return userStore.get(userId) ?? null;
 }
 
-/** Persist a user's Ed25519 public key (upsert). */
-async function savePublicKey(userId: string, publicKey: Uint8Array): Promise<void> {
+/** Create a user's Ed25519 public key. Duplicate registration must not overwrite. */
+async function createPublicKey(userId: string, publicKey: Uint8Array): Promise<void> {
+  if (userStore.has(userId)) {
+    throw new RegistrationFailedError();
+  }
+  userStore.set(userId, publicKey);
+}
+
+/** Replace a user's Ed25519 public key after an authenticated rekey proof. */
+async function replacePublicKey(userId: string, publicKey: Uint8Array): Promise<void> {
   userStore.set(userId, publicKey);
 }
 
@@ -128,9 +143,11 @@ function clearSessionCookie(res: Response): void {
  */
 app.get('/api/pubkey', (_req: Request, res: Response): void => {
   res.json({
-    message: 'ZKP Auth demo server is running',
-    version: '0.1.0',
-    algorithm: 'Schnorr/Ed25519 with Fiat-Shamir (SHA-512)',
+    message: 'ZKP Auth demo server is running — passwordless mode',
+    version: '0.2.0',
+    algorithm: 'Schnorr/Ed25519 + Fiat-Shamir (SHA-512)',
+    keyStorage: 'Client: Argon2id + AES-256-GCM in IndexedDB',
+    serverStores: 'Public key only (32 bytes per user)',
   });
 });
 
@@ -140,7 +157,7 @@ app.get('/api/pubkey', (_req: Request, res: Response): void => {
  *
  * `zkpRegister` is terminal — sends HTTP 201 itself.
  */
-app.post('/auth/register', zkpRegister({ savePublicKey }));
+app.post('/auth/register', zkpRegister({ getPublicKey, savePublicKey: createPublicKey }));
 
 /**
  * POST /auth/challenge
@@ -174,6 +191,22 @@ app.post(
 
     res.json({ userId });
   },
+);
+
+/**
+ * POST /auth/rekey
+ * Body: { userId: string; proofHex: string; newPublicKeyHex: string }
+ *
+ * The proof must verify against the currently registered public key before the
+ * demo store replaces it with `newPublicKeyHex`.
+ */
+app.post(
+  '/auth/rekey',
+  zkpRekey({
+    getPublicKey,
+    savePublicKey: replacePublicKey,
+    store: challengeStore,
+  }),
 );
 
 /**
@@ -245,6 +278,7 @@ app.listen(PORT, () => {
   console.log('     POST /auth/register');
   console.log('     POST /auth/challenge');
   console.log('     POST /auth/verify   → sets HttpOnly JWT cookie');
+  console.log('     POST /auth/rekey     → rotates public key after proof');
   console.log('     GET  /api/me        → reads cookie → returns user');
   console.log('     POST /api/logout    → clears cookie');
   console.log('\n   In-memory store — restarts clear all registered users.\n');

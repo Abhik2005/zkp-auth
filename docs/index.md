@@ -4,7 +4,7 @@ layout: home
 hero:
   name: "ZKP Auth"
   text: "Authentication without passwords"
-  tagline: Schnorr Proof of Knowledge on Ed25519. Your password never leaves the browser — not even as a hash.
+  tagline: Schnorr Proof of Knowledge on Ed25519. A random keypair lives on your device, encrypted by your PIN — the server stores only a public key, and nothing useful is ever sent over the wire.
   actions:
     - theme: brand
       text: Quick Start →
@@ -18,26 +18,26 @@ hero:
 
 features:
   - icon: 🔐
-    title: Zero-Knowledge
-    details: The server verifies you know your password without ever seeing it. No password hashes to steal.
+    title: Truly Passwordless
+    details: No password is ever derived, transmitted, or stored — not even a hash. A random Ed25519 key is generated on the device and encrypted locally with Argon2id.
   - icon: ⚡
     title: Drop-in for Express
     details: Three middleware functions. Mount them on your existing routes in under five minutes.
   - icon: ⚛️
     title: React-first
-    details: A single hook — useZKPAuth() — gives you register, login, logout and reactive auth state.
+    details: A single hook — useZKPAuth() — gives you register, login, hasLocalKey, logout and reactive auth state.
   - icon: 🛡️
     title: No new crypto primitives
-    details: Built on Ed25519 (battle-tested) and SHA-512. Uses @noble/curves — audited, zero-dependency.
+    details: Built on Ed25519, Argon2id, and AES-256-GCM. Uses @noble/curves and @noble/hashes — audited, zero-dependency.
 ---
 
 # Getting Started
 
 ## What is ZKP Auth?
 
-ZKP Auth lets users authenticate with a username and password **without the server ever seeing the password** — not even as a bcrypt hash.
+ZKP Auth lets users authenticate **without a password ever reaching the server** — not even as a bcrypt hash.
 
-Instead, the browser uses the password to derive an Ed25519 keypair and proves knowledge of the private key via a [Schnorr Proof of Knowledge](/how-it-works). The server stores only the 32-byte public key. No password database means no password database to breach.
+Instead, the browser generates a random Ed25519 keypair on first registration, encrypts the private key with **Argon2id + AES-256-GCM** using a local PIN, and stores the encrypted blob in IndexedDB. The server stores only the 32-byte public key. On login, the PIN decrypts the key locally, a Schnorr proof is computed, and the key is immediately zeroed. No password database means no password database to breach.
 
 ### The three-package model
 
@@ -45,7 +45,7 @@ Instead, the browser uses the password to derive an Ed25519 keypair and proves k
 |---|---|---|
 | `@zkp-auth/core` | Schnorr crypto primitives | Server (Node 20+) |
 | `@zkp-auth/server` | Express middleware + JWT | Server |
-| `@zkp-auth/client` | Browser SDK | Browser |
+| `@zkp-auth/client` | Browser SDK — keypair, storage, proof | Browser |
 | `@zkp-auth/react` | React hooks + context | Browser |
 
 ## Why use this over normal password auth?
@@ -58,13 +58,14 @@ With traditional password authentication:
 
 **Attack surfaces:** database breach exposes all hashes; offline cracking converts weak hashes to passwords; rainbow tables, timing attacks.
 
-With ZKP Auth:
+With ZKP Auth v0.2+:
 
-1. Browser derives a keypair from the password (PBKDF2 / SHA-512).
-2. Server stores only the 32-byte **public key** — mathematically useless without the private key.
-3. On login, browser proves knowledge of the private key using a one-time Schnorr proof.
+1. Browser generates a **random** Ed25519 keypair — no password involved.
+2. Private key is encrypted with Argon2id (64 MB memory wall) and stored in IndexedDB.
+3. Server stores only the 32-byte **public key** — mathematically useless without the private scalar.
+4. On login, browser decrypts the key with the PIN, proves knowledge via one-time Schnorr proof, zeroes the key.
 
-**Attack surfaces eliminated:** no hashes to steal, no offline cracking possible, replay attacks are provably impossible (each proof binds to a fresh server-issued challenge).
+**Attack surfaces eliminated:** no hashes to steal, no offline cracking possible, no password oracle, replay attacks are provably impossible (each proof binds to a fresh server-issued challenge).
 
 ::: tip When should I use it?
 ZKP Auth is a good fit when you want strong security guarantees without building an OAuth/OIDC infrastructure. It is not a replacement for MFA or certificate-based auth, but it is a dramatic improvement over bcrypt-based password stores.
@@ -118,6 +119,7 @@ import {
   zkpChallenge,
   zkpVerify,
   InMemoryChallengeStore,
+  RegistrationFailedError,
 } from '@zkp-auth/server';
 
 const app = express();
@@ -130,23 +132,20 @@ const store = new InMemoryChallengeStore();
 // In-memory user "database" — swap for your real DB
 const users = new Map<string, Uint8Array>();
 
-// Route 1 — register: save user's public key
+// Route 1 — register: stores the user's randomly generated public key
 app.post(
   '/auth/register',
   zkpRegister({
+    getPublicKey: async (userId) => users.get(userId) ?? null,
     savePublicKey: async (userId, publicKey) => {
+      if (users.has(userId)) throw new RegistrationFailedError();
       users.set(userId, publicKey);
     },
   }),
-  (_req, res) => res.json({ ok: true }),
 );
 
 // Route 2 — challenge: issue a fresh one-time nonce
-app.post(
-  '/auth/challenge',
-  zkpChallenge({ store }),
-  (req, res) => res.json({ challengeHex: res.locals.zkpChallengeHex }),
-);
+app.post('/auth/challenge', zkpChallenge({ store }));
 
 // Route 3 — verify: check the proof, issue a JWT
 app.post(
@@ -157,7 +156,6 @@ app.post(
     jwtSecret: process.env.JWT_SECRET!,
   }),
   (req, res) => {
-    // Set the JWT as an HttpOnly cookie
     res.cookie('auth', res.locals.zkpToken, {
       httpOnly: true,
       sameSite: 'strict',
@@ -191,11 +189,11 @@ createRoot(document.getElementById('root')!).render(
 ### 3. Use the hook
 
 ```tsx
-// LoginForm.tsx
+// AuthForm.tsx
 import { useZKPAuth } from '@zkp-auth/react';
 
-export function LoginForm() {
-  const { register, login, logout, isAuthenticated, loading, error, user } =
+export function AuthForm() {
+  const { register, login, hasLocalKey, logout, isAuthenticated, loading, error, user } =
     useZKPAuth();
 
   if (isAuthenticated) {
@@ -207,41 +205,31 @@ export function LoginForm() {
     );
   }
 
-  async function handleRegister(e: React.FormEvent<HTMLFormElement>) {
+  async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const form = new FormData(e.currentTarget);
-    await register(
-      form.get('username') as string,
-      form.get('password') as string,
-    );
-  }
+    const username = form.get('username') as string;
+    const pin      = form.get('pin') as string;
 
-  async function handleLogin(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    const form = new FormData(e.currentTarget);
-    await login(
-      form.get('username') as string,
-      form.get('password') as string,
-    );
+    // Automatically routes to register or login based on device state
+    const exists = await hasLocalKey(username);
+    exists ? await login(username, pin) : await register(username, pin);
   }
 
   return (
     <>
       {error && <p style={{ color: 'red' }}>{error.message}</p>}
 
-      <form onSubmit={handleRegister}>
-        <h2>Register</h2>
+      <form onSubmit={handleSubmit}>
+        <h2>Sign in</h2>
         <input name="username" placeholder="Username" required />
-        <input name="password" type="password" placeholder="Password" />
-        <button type="submit" disabled={loading}>Register</button>
-      </form>
-
-      <form onSubmit={handleLogin}>
-        <h2>Log in</h2>
-        <input name="username" placeholder="Username" required />
-        <input name="password" type="password" placeholder="Password" />
+        <input
+          name="pin"
+          type="password"
+          placeholder="PIN (stays on this device — never sent)"
+        />
         <button type="submit" disabled={loading}>
-          {loading ? 'Authenticating…' : 'Log in'}
+          {loading ? 'Authenticating…' : 'Continue'}
         </button>
       </form>
     </>
@@ -256,4 +244,4 @@ That's it. No password is ever transmitted or stored on the server.
 - **[How It Works](/how-it-works)** — understand the Schnorr proof and the full auth flow.
 - **[API Reference](/api-reference)** — complete reference for all four packages.
 - **[Security Model](/security)** — what is and isn't protected, known limitations.
-- **[Migration Guide](/migration)** — migrating an existing username/password app.
+- **[Migration Guide](/migration)** — migrating an existing username/password app to ZKP Auth.

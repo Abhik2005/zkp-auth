@@ -45,20 +45,21 @@ export type ZKPAuthHookResult = ZKPContextValue;
  *
  * ### State fields
  *
- * | Field             | Type                     | Description                                      |
- * |-------------------|--------------------------|--------------------------------------------------|
- * | `user`            | `ZKPUser \| null`        | Authenticated user, or `null`.                   |
- * | `isAuthenticated` | `boolean`                | `true` after a successful `login()`.             |
- * | `loading`         | `boolean`                | `true` while an async operation is in flight.    |
- * | `error`           | `ZkpClientError \| null` | Last error, or `null`. Narrow via `.code`.       |
+ * | Field             | Type                     | Description                                       |
+ * |-------------------|--------------------------|---------------------------------------------------|
+ * | `user`            | `ZKPUser \| null`        | Authenticated user, or `null`.                    |
+ * | `isAuthenticated` | `boolean`                | `true` after a successful `login()`.              |
+ * | `loading`         | `boolean`                | `true` while an async operation is in flight.     |
+ * | `error`           | `ZkpClientError \| null` | Last error, or `null`. Narrow via `.code`.        |
  *
  * ### Operations
  *
- * | Operation   | Description                                              |
- * |-------------|----------------------------------------------------------|
- * | `register`  | Generate keypair + POST to `/auth/register`.            |
- * | `login`     | Fetch challenge → compute proof → POST `/auth/verify`.  |
- * | `logout`    | Zero private key + reset auth state.                    |
+ * | Operation      | Description                                                    |
+ * |----------------|----------------------------------------------------------------|
+ * | `register`     | Generate keypair + encrypt with PIN + POST `/auth/register`.  |
+ * | `login`        | Decrypt key with PIN → compute proof → POST `/auth/verify`.   |
+ * | `hasLocalKey`  | Check if an encrypted key exists in storage (no network).     |
+ * | `logout`       | Reset auth state. Encrypted key stays in IndexedDB.           |
  *
  * @returns `ZKPAuthHookResult` — full context value.
  *
@@ -76,7 +77,7 @@ export type ZKPAuthHookResult = ZKPContextValue;
  *     const form = new FormData(e.currentTarget);
  *     await login(
  *       form.get('username') as string,
- *       form.get('password') as string,
+ *       form.get('pin') as string,       // PIN never sent to server
  *     );
  *   }
  *
@@ -85,7 +86,7 @@ export type ZKPAuthHookResult = ZKPContextValue;
  *   return (
  *     <form onSubmit={handleSubmit}>
  *       <input name="username" />
- *       <input name="password" type="password" />
+ *       <input name="pin" type="password" />
  *       <button type="submit" disabled={loading}>
  *         {loading ? 'Authenticating…' : 'Log in'}
  *       </button>

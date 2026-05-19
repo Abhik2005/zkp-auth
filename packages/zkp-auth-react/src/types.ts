@@ -13,7 +13,7 @@ import type { ZkpClientError } from '@zkp-auth/client';
  *
  * - `userId`       — the username supplied at registration / login.
  * - `token`        — the signed JWT returned by the server on login.
- *                    `null` immediately after `register()` (key generated,
+ *                    `null` immediately after `register()` (key stored,
  *                    but no login call made yet).
  * - `publicKeyHex` — hex-encoded Ed25519 public key registered with the
  *                    server. Available after `register()`; `null` when the
@@ -73,32 +73,42 @@ export interface ZKPContextValue extends ZKPAuthState {
   /**
    * Register a new user.
    *
-   * Sets `loading = true`, calls `ZkpAuthClient.register()`, updates `user`
-   * with the resulting `userId` and `publicKeyHex`, then sets `loading = false`.
-   * On failure, `error` is set and `user` remains unchanged.
+   * Generates a random Ed25519 keypair, encrypts the private key with `pin`
+   * using Argon2id + AES-256-GCM, and persists it in IndexedDB. The public
+   * key is sent to the server — `pin` is never transmitted.
    *
    * @param username Non-empty string, ≤ 256 UTF-8 bytes.
-   * @param password String, ≤ 4 096 UTF-8 bytes.
+   * @param pin      Non-empty string. Local-only; never sent to the server.
    */
-  register(username: string, password: string): Promise<void>;
+  register(username: string, pin: string): Promise<void>;
 
   /**
    * Authenticate an already-registered user.
    *
-   * Sets `loading = true`, calls `ZkpAuthClient.login()`, updates `user`
-   * with `userId` and `token`, sets `isAuthenticated = true`, then sets
-   * `loading = false`. On failure, `error` is set.
+   * Decrypts the local key using `pin`, computes a Schnorr ZKP proof, and
+   * submits it to the server. The private key is zeroed immediately after
+   * proof assembly.
    *
    * @param username Non-empty string, ≤ 256 UTF-8 bytes.
-   * @param password String, ≤ 4 096 UTF-8 bytes.
+   * @param pin      The PIN used when `register()` was called on this device.
    */
-  login(username: string, password: string): Promise<void>;
+  login(username: string, pin: string): Promise<void>;
 
   /**
-   * Clear the in-memory private key and reset all auth state.
+   * Check whether an encrypted key exists in local storage for `userId`.
    *
-   * Calls `ZkpAuthClient.clearKey()` then resets `user`, `isAuthenticated`,
-   * and `error` to their initial values. `loading` is not mutated.
+   * Use this to decide whether to render a "Register" or "Log in with PIN"
+   * form without making a network call.
+   *
+   * @param userId Username to check.
+   */
+  hasLocalKey(userId: string): Promise<boolean>;
+
+  /**
+   * Clear all auth state and reset to the unauthenticated initial state.
+   *
+   * Does NOT remove the encrypted key from IndexedDB — the user can log
+   * back in on this device with their PIN.
    */
   logout(): void;
 }
