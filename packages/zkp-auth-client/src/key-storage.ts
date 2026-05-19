@@ -130,6 +130,17 @@ function deriveWrappingKey(pin: string, salt: Uint8Array): Uint8Array {
 }
 
 /**
+ * Copy bytes into a fresh ArrayBuffer-backed view before passing them to
+ * WebCrypto. Some test runtimes reject sliced backing buffers or buffers from
+ * a different JS realm during BufferSource validation.
+ */
+function toWebCryptoBytes(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
+  const copy = new Uint8Array(new ArrayBuffer(bytes.byteLength));
+  copy.set(bytes);
+  return copy;
+}
+
+/**
  * Wrap (encrypt) a 32-byte private key with a PIN.
  *
  * @returns A `StoredKeyRecord` ready for IndexedDB or blob export.
@@ -147,14 +158,9 @@ async function wrapKey(
   const wrappingKeyBytes = deriveWrappingKey(pin, salt);
 
   // 3. Import the wrapping key as non-extractable AES-GCM CryptoKey.
-  // WebCrypto subtle.importKey expects ArrayBuffer (not Uint8Array<ArrayBufferLike>),
-  // so we slice to a guaranteed plain ArrayBuffer.
   const wrappingKey = await globalThis.crypto.subtle.importKey(
     'raw',
-    wrappingKeyBytes.buffer.slice(
-      wrappingKeyBytes.byteOffset,
-      wrappingKeyBytes.byteOffset + wrappingKeyBytes.byteLength,
-    ) as ArrayBuffer,
+    toWebCryptoBytes(wrappingKeyBytes),
     'AES-GCM',
     false,
     ['encrypt'],
@@ -162,17 +168,12 @@ async function wrapKey(
 
   // 4. Random IV (12 bytes — GCM standard).
   const iv = globalThis.crypto.getRandomValues(new Uint8Array(12));
-  const ivBuffer = iv.buffer.slice(iv.byteOffset, iv.byteOffset + iv.byteLength) as ArrayBuffer;
 
   // 5. Encrypt the private key.
-  const pkBuffer = privateKey.buffer.slice(
-    privateKey.byteOffset,
-    privateKey.byteOffset + privateKey.byteLength,
-  ) as ArrayBuffer;
   const ciphertext = await globalThis.crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv: ivBuffer },
+    { name: 'AES-GCM', iv: toWebCryptoBytes(iv) },
     wrappingKey,
-    pkBuffer,
+    toWebCryptoBytes(privateKey),
   );
 
   return {
@@ -203,10 +204,7 @@ async function unwrapKey(record: StoredKeyRecord, pin: string): Promise<Uint8Arr
   // 2. Import as non-extractable AES-GCM CryptoKey for decryption.
   const wrappingKey = await globalThis.crypto.subtle.importKey(
     'raw',
-    wrappingKeyBytes.buffer.slice(
-      wrappingKeyBytes.byteOffset,
-      wrappingKeyBytes.byteOffset + wrappingKeyBytes.byteLength,
-    ) as ArrayBuffer,
+    toWebCryptoBytes(wrappingKeyBytes),
     'AES-GCM',
     false,
     ['decrypt'],
@@ -214,14 +212,12 @@ async function unwrapKey(record: StoredKeyRecord, pin: string): Promise<Uint8Arr
 
   // 3. Decrypt. AES-GCM verifies the authentication tag; if the PIN is wrong
   //    the tag will not match and subtle.decrypt() rejects.
-  const ivBuffer = iv.buffer.slice(iv.byteOffset, iv.byteOffset + iv.byteLength) as ArrayBuffer;
-  const ctBuffer = ct.buffer.slice(ct.byteOffset, ct.byteOffset + ct.byteLength) as ArrayBuffer;
   let plaintext: ArrayBuffer;
   try {
     plaintext = await globalThis.crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv: ivBuffer },
+      { name: 'AES-GCM', iv: toWebCryptoBytes(iv) },
       wrappingKey,
-      ctBuffer,
+      toWebCryptoBytes(ct),
     );
   } catch (cause: unknown) {
     throw new ZkpCryptoError(
