@@ -6,9 +6,9 @@ dist/
 coverage/
 .env
 .env.local
-cover.png
-cover.svg
-zkp_auth_devto_article.md
-noble-curves-readme.md
-PROJECT.md
-scripts/
+./cover.png
+./cover.svg
+./zkp_auth_devto_article.md
+./noble-curves-readme.md
+./PROJECT.md
+./scripts/
