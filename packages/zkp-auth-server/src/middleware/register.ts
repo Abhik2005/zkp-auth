@@ -10,10 +10,7 @@ import { handleRegister } from '../core/register.js';
 import { ServerError, toErrorBody } from '../errors.js';
 import { RateLimitedError } from '../errors.js';
 import { logKeyOverwriteAttempt, logRegistrationAttempt } from '../audit-log.js';
-import {
-  checkRegistrationRateLimit,
-  getRequestIp,
-} from '../rate-limit.js';
+import { checkRegistrationRateLimit, getRequestIp } from '../rate-limit.js';
 import type { ZkpRegisterOptions } from '../types.js';
 
 const DEFAULT_MIN_REGISTER_RESPONSE_MS = 150;
@@ -51,10 +48,7 @@ export function zkpRegister(options: ZkpRegisterOptions): RequestHandler {
     const ip = getRequestIp(req);
     const userId = extractUserIdForAudit(req.body as unknown);
 
-    const rateLimitDecision = checkRegistrationRateLimit(
-      ip,
-      options.registrationRateLimiter,
-    );
+    const rateLimitDecision = checkRegistrationRateLimit(ip, options.registrationRateLimiter);
     if (!rateLimitDecision.allowed) {
       await auditRegistrationAttempt(options, {
         userId,

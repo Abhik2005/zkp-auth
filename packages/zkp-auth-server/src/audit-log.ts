@@ -83,11 +83,7 @@ export function hashUsername(userId: string): string {
 
 function toTimestamp(input?: number | Date): AuditTimestamp {
   const timestampMs =
-    input instanceof Date
-      ? input.getTime()
-      : typeof input === 'number'
-        ? input
-        : Date.now();
+    input instanceof Date ? input.getTime() : typeof input === 'number' ? input : Date.now();
   const safeTimestampMs = Number.isFinite(timestampMs) ? timestampMs : Date.now();
   return {
     timestampMs: safeTimestampMs,
@@ -119,10 +115,7 @@ function safeFallbackWrite(record: AuditRecord): void {
   }
 }
 
-async function emitRecord(
-  sink: AuditSink,
-  record: AuditRecord,
-): Promise<void> {
+async function emitRecord(sink: AuditSink, record: AuditRecord): Promise<void> {
   try {
     await sink.write(record);
   } catch {
@@ -134,9 +127,7 @@ async function emitRecord(
 // Record builders
 // ---------------------------------------------------------------------------
 
-function buildRegistrationRecord(
-  input: RegistrationAttemptInput,
-): RegistrationAuditRecord {
+function buildRegistrationRecord(input: RegistrationAttemptInput): RegistrationAuditRecord {
   return {
     event: 'registration_attempt',
     severity: input.success ? 'info' : 'warn',
@@ -148,9 +139,7 @@ function buildRegistrationRecord(
   };
 }
 
-function buildKeyOverwriteRecord(
-  input: KeyOverwriteAttemptInput,
-): KeyOverwriteAuditRecord {
+function buildKeyOverwriteRecord(input: KeyOverwriteAttemptInput): KeyOverwriteAuditRecord {
   return {
     event: 'key_overwrite_attempt',
     severity: 'critical',

@@ -137,10 +137,7 @@ export class InMemoryRateLimiter {
     this.entries.clear();
   }
 
-  private getOrCreate(
-    ip: string,
-    now: number,
-  ): MutableRegistrationRateLimitEntry {
+  private getOrCreate(ip: string, now: number): MutableRegistrationRateLimitEntry {
     const existing = this.entries.get(ip);
     if (existing !== undefined) {
       return existing;
@@ -160,10 +157,7 @@ export class InMemoryRateLimiter {
     return created;
   }
 
-  private rollWindows(
-    entry: MutableRegistrationRateLimitEntry,
-    now: number,
-  ): void {
+  private rollWindows(entry: MutableRegistrationRateLimitEntry, now: number): void {
     if (now - entry.hourWindowStartedAt >= HOUR_MS) {
       entry.hourWindowStartedAt = now;
       entry.hourCount = 0;
@@ -305,18 +299,9 @@ export function getRequestIp(req: Request): string {
 }
 
 function normalizePolicy(policy: RateLimitPolicy): NormalizedRateLimitPolicy {
-  const maxPerHour = sanitizePositiveInteger(
-    policy.maxPerHour,
-    DEFAULT_REGISTER_MAX_PER_HOUR,
-  );
-  const maxPerDay = sanitizePositiveInteger(
-    policy.maxPerDay,
-    DEFAULT_REGISTER_MAX_PER_DAY,
-  );
-  const baseBackoffMs = sanitizePositiveInteger(
-    policy.baseBackoffMs,
-    DEFAULT_BASE_BACKOFF_MS,
-  );
+  const maxPerHour = sanitizePositiveInteger(policy.maxPerHour, DEFAULT_REGISTER_MAX_PER_HOUR);
+  const maxPerDay = sanitizePositiveInteger(policy.maxPerDay, DEFAULT_REGISTER_MAX_PER_DAY);
+  const baseBackoffMs = sanitizePositiveInteger(policy.baseBackoffMs, DEFAULT_BASE_BACKOFF_MS);
   const maxBackoffMs = Math.max(
     baseBackoffMs,
     sanitizePositiveInteger(policy.maxBackoffMs, DEFAULT_MAX_BACKOFF_MS),
@@ -330,10 +315,7 @@ function normalizePolicy(policy: RateLimitPolicy): NormalizedRateLimitPolicy {
   };
 }
 
-function sanitizePositiveInteger(
-  value: number | undefined,
-  fallback: number,
-): number {
+function sanitizePositiveInteger(value: number | undefined, fallback: number): number {
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
     return fallback;
   }
@@ -345,10 +327,7 @@ function normalizeIp(ip: string): string {
   return trimmed.length > 0 ? trimmed : 'unknown';
 }
 
-function calculateBackoffMs(
-  failures: number,
-  policy: NormalizedRateLimitPolicy,
-): number {
+function calculateBackoffMs(failures: number, policy: NormalizedRateLimitPolicy): number {
   const exponent = Math.min(Math.max(failures - 1, 0), 16);
   return Math.min(policy.baseBackoffMs * 2 ** exponent, policy.maxBackoffMs);
 }

@@ -135,9 +135,7 @@ async function handleRegisterInner(
     if (e instanceof RegistrationFailedError) {
       throw e;
     }
-    throw new InternalError(
-      `savePublicKey threw: ${e instanceof Error ? e.message : String(e)}`,
-    );
+    throw new InternalError(`savePublicKey threw: ${e instanceof Error ? e.message : String(e)}`);
   }
 
   return { status: 'registered', userId };
@@ -184,10 +182,7 @@ function parseBody(body: unknown): ParsedBody {
  */
 function decodePublicKeyHex(hex: string): Uint8Array {
   if (!/^[0-9a-fA-F]{64}$/.test(hex)) {
-    throw new InvalidEncodingError(
-      'publicKeyHex',
-      'must be exactly 64 hex characters (32 bytes)',
-    );
+    throw new InvalidEncodingError('publicKeyHex', 'must be exactly 64 hex characters (32 bytes)');
   }
   return Uint8Array.from(Buffer.from(hex, 'hex'));
 }

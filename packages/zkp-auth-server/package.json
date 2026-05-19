@@ -1,8 +1,15 @@
 {
   "name": "@zkp-auth/server",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "description": "Express middleware for ZKP authentication",
-  "keywords": ["zkp", "zero-knowledge", "authentication", "express", "middleware", "typescript"],
+  "keywords": [
+    "zkp",
+    "zero-knowledge",
+    "authentication",
+    "express",
+    "middleware",
+    "typescript"
+  ],
   "author": "Vedad Kovačević",
   "repository": {
     "type": "git",
@@ -42,6 +49,8 @@
     "typescript": "^5.4.0",
     "vitest": "^1.4.0"
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "license": "MIT"
 }

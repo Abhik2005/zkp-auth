@@ -35,11 +35,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import express, { type Express } from 'express';
 import request from 'supertest';
-import {
-  generateKeyPair,
-  generateChallenge,
-  computeProof,
-} from '@zkp-auth/core';
+import { generateKeyPair, generateChallenge, computeProof } from '@zkp-auth/core';
 import {
   zkpRegister,
   zkpChallenge,
@@ -64,10 +60,7 @@ const JWT_SECRET = 'super-secret-key-at-least-32-bytes!';
 // ---------------------------------------------------------------------------
 
 /** Build a minimal Express app wired with all three middleware. */
-function buildApp(
-  store: IChallengeStore,
-  keyDb: Map<string, Uint8Array>,
-): Express {
+function buildApp(store: IChallengeStore, keyDb: Map<string, Uint8Array>): Express {
   const app = express();
   app.use(express.json());
 
@@ -142,10 +135,7 @@ async function fullFlow(
     .expect(201);
 
   // Challenge
-  const challengeRes = await request(app)
-    .post('/auth/challenge')
-    .send({ userId })
-    .expect(200);
+  const challengeRes = await request(app).post('/auth/challenge').send({ userId }).expect(200);
   const { challengeHex } = challengeRes.body as { challengeHex: string };
 
   // Prove
@@ -154,10 +144,7 @@ async function fullFlow(
   const proofHex = Buffer.from(proof).toString('hex');
 
   // Verify
-  const verifyRes = await request(app)
-    .post('/auth/verify')
-    .send({ userId, proofHex })
-    .expect(200);
+  const verifyRes = await request(app).post('/auth/verify').send({ userId, proofHex }).expect(200);
 
   return {
     token: (verifyRes.body as { token: string }).token,
@@ -213,10 +200,7 @@ describe('POST /auth/register', () => {
   });
 
   it('register_missingPublicKeyHex_returns400MissingField', async () => {
-    const res = await request(app)
-      .post('/auth/register')
-      .send({ userId: 'alice' })
-      .expect(400);
+    const res = await request(app).post('/auth/register').send({ userId: 'alice' }).expect(400);
 
     expect((res.body as { error: { code: string } }).error.code).toBe('MISSING_FIELD');
   });
@@ -252,7 +236,10 @@ describe('POST /auth/register', () => {
     const hex = Buffer.from(publicKey).toString('hex');
     const attackerHex = Buffer.from(attacker.publicKey).toString('hex');
 
-    await request(app).post('/auth/register').send({ userId: 'alice', publicKeyHex: hex }).expect(201);
+    await request(app)
+      .post('/auth/register')
+      .send({ userId: 'alice', publicKeyHex: hex })
+      .expect(201);
     const res = await request(app)
       .post('/auth/register')
       .send({ userId: 'alice', publicKeyHex: attackerHex })
@@ -315,10 +302,7 @@ describe('POST /auth/register', () => {
 
 describe('POST /auth/challenge', () => {
   it('challenge_validUserId_returns200WithHexAndExpiry', async () => {
-    const res = await request(app)
-      .post('/auth/challenge')
-      .send({ userId: 'alice' })
-      .expect(200);
+    const res = await request(app).post('/auth/challenge').send({ userId: 'alice' }).expect(200);
 
     const body = res.body as { status: string; challengeHex: string; expiresInMs: number };
     expect(body.status).toBe('challenge_issued');
@@ -327,10 +311,7 @@ describe('POST /auth/challenge', () => {
   });
 
   it('challenge_missingUserId_returns400', async () => {
-    const res = await request(app)
-      .post('/auth/challenge')
-      .send({})
-      .expect(400);
+    const res = await request(app).post('/auth/challenge').send({}).expect(400);
 
     expect((res.body as { error: { code: string } }).error.code).toBe('MISSING_FIELD');
   });
@@ -342,7 +323,9 @@ describe('POST /auth/challenge', () => {
       '/auth/challenge',
       zkpChallenge({
         store,
-        rateLimitHook: async () => { throw new Error('too many'); },
+        rateLimitHook: async () => {
+          throw new Error('too many');
+        },
       }),
     );
 
@@ -386,10 +369,7 @@ describe('POST /auth/verify', () => {
       .send({ userId, publicKeyHex: Buffer.from(publicKey).toString('hex') })
       .expect(201);
 
-    const challengeRes = await request(app)
-      .post('/auth/challenge')
-      .send({ userId })
-      .expect(200);
+    const challengeRes = await request(app).post('/auth/challenge').send({ userId }).expect(200);
     const challengeHex = (challengeRes.body as { challengeHex: string }).challengeHex;
 
     const challengeBytes = Uint8Array.from(Buffer.from(challengeHex, 'hex'));
@@ -414,10 +394,7 @@ describe('POST /auth/verify', () => {
   });
 
   it('verify_missingProofHex_returns400', async () => {
-    const res = await request(app)
-      .post('/auth/verify')
-      .send({ userId: 'alice' })
-      .expect(400);
+    const res = await request(app).post('/auth/verify').send({ userId: 'alice' }).expect(400);
 
     expect((res.body as { error: { code: string } }).error.code).toBe('MISSING_FIELD');
   });
@@ -470,9 +447,7 @@ describe('POST /auth/verify', () => {
     // Issue with a 5-second TTL
     const shortStore = new InMemoryChallengeStore();
     const shortApp = buildApp(shortStore, keyDb);
-    const challengeRes = await request(shortApp)
-      .post('/auth/challenge')
-      .send({ userId });
+    const challengeRes = await request(shortApp).post('/auth/challenge').send({ userId });
     const challengeHex = (challengeRes.body as { challengeHex: string }).challengeHex;
 
     // Advance past TTL
@@ -499,10 +474,7 @@ describe('POST /auth/verify', () => {
       .send({ userId, publicKeyHex: Buffer.from(publicKey).toString('hex') })
       .expect(201);
 
-    const challengeRes = await request(app)
-      .post('/auth/challenge')
-      .send({ userId })
-      .expect(200);
+    const challengeRes = await request(app).post('/auth/challenge').send({ userId }).expect(200);
     const challengeHex = (challengeRes.body as { challengeHex: string }).challengeHex;
     const challengeBytes = Uint8Array.from(Buffer.from(challengeHex, 'hex'));
     const proof = computeProof(privateKey, new Uint8Array(0), challengeBytes);
@@ -512,10 +484,7 @@ describe('POST /auth/verify', () => {
     await request(app).post('/auth/verify').send({ userId, proofHex }).expect(200);
 
     // Second verify with the SAME proof must fail (challenge already consumed)
-    const res = await request(app)
-      .post('/auth/verify')
-      .send({ userId, proofHex })
-      .expect(400);
+    const res = await request(app).post('/auth/verify').send({ userId, proofHex }).expect(400);
 
     expect((res.body as { error: { code: string } }).error.code).toBe('CHALLENGE_EXPIRED');
   });
@@ -553,7 +522,9 @@ describe('POST /auth/verify', () => {
         getPublicKey: async () => null,
         store,
         jwtSecret: JWT_SECRET,
-        rateLimitHook: async () => { throw new Error('blocked'); },
+        rateLimitHook: async () => {
+          throw new Error('blocked');
+        },
       }),
     );
 
@@ -572,10 +543,7 @@ describe('POST /auth/verify', () => {
 
 describe('Error response shape', () => {
   it('allErrors_haveCodeAndMessage', async () => {
-    const res = await request(app)
-      .post('/auth/register')
-      .send({})
-      .expect(400);
+    const res = await request(app).post('/auth/register').send({}).expect(400);
 
     const body = res.body as { error: { code: string; message: string } };
     expect(typeof body.error.code).toBe('string');

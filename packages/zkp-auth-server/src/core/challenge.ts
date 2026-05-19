@@ -11,11 +11,7 @@
  */
 
 import { generateChallenge } from '@zkp-auth/core';
-import {
-  MissingFieldError,
-  InternalError,
-  ServerError,
-} from '../errors.js';
+import { MissingFieldError, InternalError, ServerError } from '../errors.js';
 import type { ZkpChallengeOptions } from '../types.js';
 
 // ---------------------------------------------------------------------------

@@ -60,11 +60,7 @@ export interface ZkpJwtPayload {
  * @returns                  A compact JWT string `header.payload.signature`.
  * @throws TypeError         When `secret` encodes to fewer than 32 bytes.
  */
-export function signJwt(
-  userId: string,
-  secret: string,
-  expiresInSeconds = 3_600,
-): string {
+export function signJwt(userId: string, secret: string, expiresInSeconds = 3_600): string {
   assertSecretLength(secret);
 
   const iat = Math.floor(Date.now() / 1_000);

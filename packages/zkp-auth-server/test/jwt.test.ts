@@ -101,9 +101,9 @@ describe('verifyJwt', () => {
   it('verifyJwt_nonHS256Header_throwsInvalidJwtError', () => {
     // Craft a token with alg: RS256 header.
     const fakeHeader = Buffer.from('{"alg":"RS256","typ":"JWT"}').toString('base64url');
-    const fakePayload = Buffer.from(
-      `{"sub":"${USER_ID}","iat":1000,"exp":9999999999}`,
-    ).toString('base64url');
+    const fakePayload = Buffer.from(`{"sub":"${USER_ID}","iat":1000,"exp":9999999999}`).toString(
+      'base64url',
+    );
     const fakeSig = 'invalidsig';
     expect(() => verifyJwt(`${fakeHeader}.${fakePayload}.${fakeSig}`, SECRET)).toThrow(
       InvalidJwtError,

@@ -56,10 +56,7 @@ interface ParsedBody {
 // Framework-agnostic handler
 // ---------------------------------------------------------------------------
 
-export async function handleRekey(
-  body: unknown,
-  options: ZkpRekeyOptions,
-): Promise<RekeyResult> {
+export async function handleRekey(body: unknown, options: ZkpRekeyOptions): Promise<RekeyResult> {
   const startedAt = Date.now();
   try {
     return await handleRekeyInner(body, options);
@@ -68,10 +65,7 @@ export async function handleRekey(
   }
 }
 
-async function handleRekeyInner(
-  body: unknown,
-  options: ZkpRekeyOptions,
-): Promise<RekeyResult> {
+async function handleRekeyInner(body: unknown, options: ZkpRekeyOptions): Promise<RekeyResult> {
   const { userId, proofHex, newPublicKeyHex } = parseBody(body);
 
   const proof = decodeProofHex(proofHex);
@@ -114,9 +108,7 @@ async function handleRekeyInner(
       throw new InternalError(`verifyProof threw ${e.code}: ${e.message}`);
     }
     throw new InternalError(
-      `verifyProof threw unexpectedly during rekey: ${
-        e instanceof Error ? e.message : String(e)
-      }`,
+      `verifyProof threw unexpectedly during rekey: ${e instanceof Error ? e.message : String(e)}`,
     );
   }
 
@@ -175,13 +167,7 @@ export function zkpRekey(options: ZkpRekeyOptions): RequestHandler {
       res.status(200).json(result);
     } catch (e) {
       if (e instanceof ServerError) {
-        await auditKeyOverwriteAttempt(
-          options,
-          userId,
-          ip,
-          false,
-          e.code.toLowerCase(),
-        );
+        await auditKeyOverwriteAttempt(options, userId, ip, false, e.code.toLowerCase());
         res.status(e.httpStatus).json(toErrorBody(e));
         return;
       }
@@ -235,10 +221,7 @@ function parseBody(body: unknown): ParsedBody {
   if (typeof raw['proofHex'] !== 'string' || raw['proofHex'].length === 0) {
     throw new MissingFieldError('proofHex');
   }
-  if (
-    typeof raw['newPublicKeyHex'] !== 'string' ||
-    raw['newPublicKeyHex'].length === 0
-  ) {
+  if (typeof raw['newPublicKeyHex'] !== 'string' || raw['newPublicKeyHex'].length === 0) {
     throw new MissingFieldError('newPublicKeyHex');
   }
 
@@ -251,10 +234,7 @@ function parseBody(body: unknown): ParsedBody {
 
 function decodeProofHex(hex: string): Uint8Array {
   if (!/^[0-9a-fA-F]{128}$/.test(hex)) {
-    throw new InvalidEncodingError(
-      'proofHex',
-      'must be exactly 128 hex characters (64 bytes)',
-    );
+    throw new InvalidEncodingError('proofHex', 'must be exactly 128 hex characters (64 bytes)');
   }
   return Uint8Array.from(Buffer.from(hex, 'hex'));
 }

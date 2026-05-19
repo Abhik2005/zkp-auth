@@ -9,10 +9,7 @@
 
 import type { Request } from 'express';
 import type { AuditLogger } from './audit-log.js';
-import type {
-  InMemoryRateLimiter,
-  InMemoryRegistrationRateLimiter,
-} from './rate-limit.js';
+import type { InMemoryRateLimiter, InMemoryRegistrationRateLimiter } from './rate-limit.js';
 
 // ---------------------------------------------------------------------------
 // Rate-limit hook
@@ -78,9 +75,7 @@ export type SavePublicKeyFn = (userId: string, publicKey: Uint8Array) => Promise
  * @param userId The user identifier extracted from the request body.
  * @returns      Existing public key, or `null` if no key exists.
  */
-export type GetRegistrationPublicKeyFn = (
-  userId: string,
-) => Promise<Uint8Array | null>;
+export type GetRegistrationPublicKeyFn = (userId: string) => Promise<Uint8Array | null>;
 
 // ---------------------------------------------------------------------------
 // Challenge store interface (injectable)
@@ -245,7 +240,6 @@ export interface ZkpUser {
   /** The authenticated user identifier from the request body. */
   userId: string;
 }
-
 
 // ---------------------------------------------------------------------------
 // Wire-format shapes for request bodies

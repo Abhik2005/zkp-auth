@@ -76,9 +76,7 @@ export async function handleVerify(
   try {
     publicKey = await options.getPublicKey(userId);
   } catch (e) {
-    throw new InternalError(
-      `getPublicKey threw: ${e instanceof Error ? e.message : String(e)}`,
-    );
+    throw new InternalError(`getPublicKey threw: ${e instanceof Error ? e.message : String(e)}`);
   }
   if (publicKey === null) {
     throw new PublicKeyNotFoundError(userId);
@@ -138,9 +136,7 @@ export async function handleVerify(
   } catch (e) {
     if (e instanceof InvalidInputError) {
       // Stored public key or challenge is malformed — internal fault.
-      throw new InternalError(
-        `verifyProof threw ${e.code}: ${e.message}`,
-      );
+      throw new InternalError(`verifyProof threw ${e.code}: ${e.message}`);
     }
     throw new InternalError(
       `verifyProof threw unexpectedly: ${e instanceof Error ? e.message : String(e)}`,
@@ -152,16 +148,13 @@ export async function handleVerify(
   }
 
   // ── 6. Issue JWT (ONLY after verification returns true) ───────────────────
-  const expiresInSeconds =
-    options.jwtExpiresInSeconds ?? DEFAULT_JWT_EXPIRES_IN_SECONDS;
+  const expiresInSeconds = options.jwtExpiresInSeconds ?? DEFAULT_JWT_EXPIRES_IN_SECONDS;
 
   let token: string;
   try {
     token = signJwt(userId, options.jwtSecret, expiresInSeconds);
   } catch (e) {
-    throw new InternalError(
-      `JWT signing failed: ${e instanceof Error ? e.message : String(e)}`,
-    );
+    throw new InternalError(`JWT signing failed: ${e instanceof Error ? e.message : String(e)}`);
   }
 
   return { status: 'verified', userId, token };
@@ -203,10 +196,7 @@ function parseBody(body: unknown): ParsedBody {
  */
 function decodeProofHex(hex: string): Uint8Array {
   if (!/^[0-9a-fA-F]{128}$/.test(hex)) {
-    throw new InvalidEncodingError(
-      'proofHex',
-      'must be exactly 128 hex characters (64 bytes)',
-    );
+    throw new InvalidEncodingError('proofHex', 'must be exactly 128 hex characters (64 bytes)');
   }
   return Uint8Array.from(Buffer.from(hex, 'hex'));
 }
