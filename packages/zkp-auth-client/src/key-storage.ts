@@ -325,15 +325,15 @@ function openDb(idbFactory: IDBFactory): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const req = idbFactory.open(DB_NAME, DB_VERSION);
 
-    req.onupgradeneeded = () => {
+    req.onupgradeneeded = (): void => {
       const db = req.result;
       if (!db.objectStoreNames.contains(STORE_NAME)) {
         db.createObjectStore(STORE_NAME);
       }
     };
 
-    req.onsuccess = () => { resolve(req.result); };
-    req.onerror = () => {
+    req.onsuccess = (): void => { resolve(req.result); };
+    req.onerror = (): void => {
       reject(new Error(`IndexedDB open failed: ${req.error?.message ?? 'unknown'}`));
     };
   });
@@ -353,9 +353,9 @@ function idbTransaction<T>(
     const tx = db.transaction(STORE_NAME, mode);
     const store = tx.objectStore(STORE_NAME);
     const req = operate(store);
-    req.onsuccess = () => { resolve(req.result as T); };
-    req.onerror = () => { reject(req.error); };
-    tx.onerror = () => { reject(tx.error); };
+    req.onsuccess = (): void => { resolve(req.result as T); };
+    req.onerror = (): void => { reject(req.error); };
+    tx.onerror = (): void => { reject(tx.error); };
   });
 }
 

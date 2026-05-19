@@ -257,13 +257,13 @@ function runKeyStorageContract(
 
     describe('Security — PIN isolation', () => {
       it('a different PIN produces distinct ciphertext (new salt each generateAndStore)', async () => {
-        const blob1 = await (async () => {
+        const blob1 = await (async (): Promise<string> => {
           await storage.generateAndStore(USER, '0000');
           const b = await storage.exportBlob(USER, '0000');
           await storage.deleteKey(USER);
           return b;
         })();
-        const blob2 = await (async () => {
+        const blob2 = await (async (): Promise<string> => {
           await storage.generateAndStore(USER, '1111');
           return storage.exportBlob(USER, '1111');
         })();

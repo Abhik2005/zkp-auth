@@ -52,8 +52,6 @@ import {
   RegistrationFailedError,
 } from '../src/index.js';
 import type { IChallengeStore } from '../src/index.js';
-import { hashUsername } from '../src/index.js';
-import type { AuditRecord } from '../src/index.js';
 
 // ---------------------------------------------------------------------------
 // Constants

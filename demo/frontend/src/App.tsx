@@ -74,7 +74,6 @@ export function App(): JSX.Element {
     isAuthenticated,
     login,
     register,
-    hasLocalKey,
     logout: zkpLogout,
     loading: zkpLoading,
     error: zkpError,
@@ -88,7 +87,7 @@ export function App(): JSX.Element {
 
   useEffect(() => {
     let cancelled = false;
-    void (async () => {
+    void (async (): Promise<void> => {
       const me = await fetchMe();
       if (!cancelled) {
         setSession(me !== null
@@ -97,14 +96,14 @@ export function App(): JSX.Element {
         );
       }
     })();
-    return () => { cancelled = true; };
+    return (): void => { cancelled = true; };
   }, []);
 
   // ── After ZKP login() succeeds, hydrate session from the new cookie ──────
 
   useEffect(() => {
     if (!isAuthenticated) return;
-    void (async () => {
+    void (async (): Promise<void> => {
       const me = await fetchMe();
       if (me !== null) {
         setSession({ status: 'authenticated', user: me });

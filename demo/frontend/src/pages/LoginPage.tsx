@@ -35,7 +35,7 @@ export function LoginPage({ onSwitchToRegister, login, loading, error }: LoginPa
     // App.tsx watches isAuthenticated and calls /api/me when it flips.
   }
 
-  const errorMessage = error !== null ? (() => {
+  const errorMessage = error !== null ? ((): string => {
     if (error.code === 'DECRYPTION_FAILED') return 'Wrong PIN — could not decrypt local key.';
     if (error.code === 'KEY_NOT_FOUND') return 'No key found for this username on this device. Register first.';
     if (error.code === 'PROOF_REJECTED' || error.code === 'CHALLENGE_FAILED') {

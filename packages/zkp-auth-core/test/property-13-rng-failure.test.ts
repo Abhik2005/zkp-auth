@@ -232,7 +232,7 @@ describe('Property 13 (computeProof portion): RNG anomaly produces RandomnessErr
   // - `validPwd`: a short UTF-8 buffer (4 bytes), well within the
   //   `[0, 4096]` length bound on `password`.
   // - `validChal`: 32 bytes of `0x42`; only its shape matters here.
-  const validPriv = (() => {
+  const validPriv = ((): Uint8Array => {
     const k = new Uint8Array(32);
     k[0] = 0x02;
     return k;

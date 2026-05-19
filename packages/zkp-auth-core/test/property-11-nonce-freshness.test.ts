@@ -111,7 +111,7 @@ const N = 1000;
 // — `R = r·G` depends on the CSPRNG-drawn nonce `r`, not on
 // `privateKey` (Requirement 6.3) — so we pick the smallest non-trivial
 // scalar to keep the literal compact and self-documenting.
-const FIXED_PRIVATE_KEY: Uint8Array = (() => {
+const FIXED_PRIVATE_KEY: Uint8Array = ((): Uint8Array => {
   const k = new Uint8Array(32);
   k[0] = 0x02;
   return k;

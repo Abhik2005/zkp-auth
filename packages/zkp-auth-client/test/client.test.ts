@@ -9,6 +9,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ZkpAuthClient } from '../src/client.js';
 import { ZkpCryptoError, ZkpServerError, ZkpStorageError } from '../src/errors.js';
 import { MemoryKeyStorage } from '../src/key-storage.js';
+import type { ChallengeResult, RegisterResult, VerifyResult } from '../src/http.js';
 
 // ── Mock the HTTP transport layer ─────────────────────────────────────────────
 
@@ -16,9 +17,9 @@ vi.mock('../src/http.js', () => ({
   postRegister: vi.fn(),
   postChallenge: vi.fn(),
   postVerify: vi.fn(),
-  bytesToHex: (bytes: Uint8Array) =>
+  bytesToHex: (bytes: Uint8Array): string =>
     Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join(''),
-  hexToBytes: (hex: string) => {
+  hexToBytes: (hex: string): Uint8Array => {
     const bytes = new Uint8Array(hex.length / 2);
     for (let i = 0; i < bytes.length; i++) {
       bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
@@ -35,7 +36,7 @@ const TEST_PIN = '123456';
 const CHALLENGE_HEX = 'a'.repeat(64);
 const FAKE_JWT = 'header.payload.signature';
 
-function makeChallengeResult() {
+function makeChallengeResult(): ChallengeResult {
   return {
     status: 'challenge_issued' as const,
     challengeHex: CHALLENGE_HEX,
@@ -43,11 +44,11 @@ function makeChallengeResult() {
   };
 }
 
-function makeVerifyResult() {
+function makeVerifyResult(): VerifyResult {
   return { token: FAKE_JWT };
 }
 
-function makeRegisterResult(userId = 'alice') {
+function makeRegisterResult(userId = 'alice'): RegisterResult {
   return { status: 'registered' as const, userId };
 }
 
